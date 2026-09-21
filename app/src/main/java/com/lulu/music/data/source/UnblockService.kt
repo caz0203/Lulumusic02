@@ -47,6 +47,16 @@ object UnblockService {
     )
 
     /**
+     * 可以带到「拉流」请求上的请求头：音源解析接口用的头，拉流时往往同样需要。
+     * 其余自定义字段（业务参数）不往上带，避免把请求搞坏；`Range` 不在其中
+     * —— 播放器自己的分段请求会覆盖它。
+     */
+    private val STREAM_HEADER_KEYS = setOf(
+        "user-agent", "referer", "origin", "cookie", "accept",
+        "accept-language", "authorization",
+    )
+
+    /**
      * QQ 直链经常被固定在某个不稳定的 CDN 节点上。
      * 这里不做 Range 探测：部分 QQ CDN 会拒绝探测请求，但播放器带完整请求头仍能正常播放；
      * 真正失败由播放器反馈，再换下一个节点。
@@ -65,6 +75,9 @@ object UnblockService {
             .onFailure { Log.d(TAG, "音源配置加载失败：${it.message ?: it}") }
     }
 
+    /** 解析结果：可播放直链 + 产生它的音源自带的请求头（供播放器拉流时复用）。 */
+    data class ResolvedStream(val url: String, val headers: Map<String, String>)
+
     /**
      * 按启用顺序尝试所有可用音源，返回第一个可播放地址；全部失败返回 null。
      *
@@ -72,14 +85,32 @@ object UnblockService {
      * 脚本音源共用同一个 WebView，并发执行会互相覆盖全局的 `module` / `__beansPlugin`，
      * 串行既避免了互相踩踏，也保证「先启用的音源优先」这一直觉。
      */
-    suspend fun resolve(song: Song, quality: BeansAudioQuality): String? = runCatching {
+    suspend fun resolve(song: Song, quality: BeansAudioQuality): String? =
+        resolveStream(song, quality)?.url
+
+    /**
+     * 同 [resolve]，但额外返回命中音源的请求头。
+     *
+     * 播放器直接播放第三方直链时（不经过 `beans://` 懒解析）拿不到音源配置，
+     * 部分直链缺少音源自己的 `User-Agent` / `Referer` / `Cookie` 就会 403，
+     * 所以这里把「可安全外发」的头一并返回，由播放层加到拉流请求上。
+     */
+    suspend fun resolveStream(
+        song: Song,
+        quality: BeansAudioQuality,
+    ): ResolvedStream? = runCatching {
         if (song.name.isBlank() && song.artists.isBlank()) return@runCatching null
 
         val sources = UnblockSourceStore.enabledSources.filter { source ->
-            source.isScript || canUse(source, song)
+            val usable = source.isScript || canUse(source, song)
+            if (!usable) {
+                val declared = source.headers["source"] ?: source.headers["platform"] ?: "未声明"
+                Log.d(TAG, "音源不适用于该歌曲：${source.name}｜歌曲平台=${song.source.raw}｜音源平台=$declared")
+            }
+            usable
         }
         if (sources.isEmpty()) {
-            Log.d(TAG, "没有启用的自定义音源：平台=${song.source.raw}")
+            Log.d(TAG, "没有可用的自定义音源：平台=${song.source.raw}")
             return@runCatching null
         }
 
@@ -94,19 +125,29 @@ object UnblockService {
             } else {
                 presetSourceRequest(source, song, preferred)
             }
-            if (!url.isNullOrBlank()) return@runCatching url
+            if (!url.isNullOrBlank()) return@runCatching ResolvedStream(url, streamHeaders(source))
         }
         null
     }.getOrNull()
+
+    /** 音源声明的、可安全带到拉流请求上的请求头。 */
+    private fun streamHeaders(source: ThirdPartySource): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for ((key, value) in source.headers) {
+            if (value.isBlank()) continue
+            val normalized = key.lowercase()
+            if (normalized in METADATA_HEADER_KEYS) continue
+            if (normalized in STREAM_HEADER_KEYS || normalized.startsWith("x-")) out[key] = value
+        }
+        return out
+    }
 
     // ---------------------------------------------------------------------
     // 预设音源
     // ---------------------------------------------------------------------
 
     private fun canUse(source: ThirdPartySource, song: Song): Boolean {
-        val expectedProvider = providerCode(song.source)
-        val provider = source.headers["source"]
-        if (!provider.isNullOrEmpty() && provider != expectedProvider) return false
+        if (!sourceMatchesPlatform(source, song)) return false
         return when (song.source) {
             SongSource.QQ -> !song.qqMid.isNullOrEmpty()
             SongSource.KUGOU -> !song.kugouHash.isNullOrEmpty()
@@ -120,9 +161,7 @@ object UnblockService {
         preferredQuality: ThirdPartyAudioQuality,
     ): String? {
         if (source.template.isBlank()) return null
-        val expectedProvider = providerCode(song.source)
-        val provider = source.headers["source"]
-        if (!provider.isNullOrEmpty() && provider != expectedProvider) return null
+        if (!sourceMatchesPlatform(source, song)) return null
 
         val songIDs: List<String> = when {
             song.source == SongSource.NET_EASE && song.id > 0 -> listOf(song.id.toString())
@@ -160,7 +199,7 @@ object UnblockService {
             for ((placeholder, value) in idValues) {
                 baseURLString = baseURLString.replace(placeholder, value)
             }
-            baseURLString = baseURLString.replace("{source}", expectedProvider)
+            baseURLString = baseURLString.replace("{source}", providerCode(song.source))
             // iOS 用的是 .urlQueryAllowed（不转义 & = ? /）；这里用严格百分号编码，
             // 名字里带 & 或空格时反而不会把查询串截断。
             baseURLString = baseURLString.replace("{name}", urlEncoded(song.name))
@@ -461,6 +500,34 @@ object UnblockService {
         SongSource.QQ -> "tx"
         SongSource.KUGOU -> "kg"
     }
+
+    /**
+     * 音源声明的平台是否适用于这首歌。
+     *
+     * 判定用的字段是 `headers["source"]` 与 `headers["platform"]`（导入时两者都可能出现）：
+     *  - **没有声明**，或声明了无法识别的取值 → 适用于所有平台。
+     *    旧配置里 `source` 常被当成普通请求头带进来，不能因为一个看不懂的取值就把音源整体判死
+     *    （这正是「导入成功却永远用不上」的原因）；无法识别时更稳妥的做法是让它去试，
+     *    真不支持会在请求阶段自然地失败并落到下一个音源。
+     *  - **声明了可识别的平台** → 必须与歌曲平台一致。别名与规范代码等价：
+     *    `wy` / `netease` / `cloud` → 网易云，`tx` / `qq` / `qqmusic` → QQ，`kg` / `kugou` → 酷狗。
+     */
+    private fun sourceMatchesPlatform(source: ThirdPartySource, song: Song): Boolean {
+        val declared = listOf(source.headers["source"], source.headers["platform"])
+            .mapNotNull(::normalizeProviderCode)
+            .distinct()
+        if (declared.isEmpty()) return true
+        return providerCode(song.source) in declared
+    }
+
+    /** 平台代码 / 别名 → 规范代码；无法识别时返回 null。 */
+    private fun normalizeProviderCode(raw: String?): String? =
+        when (raw?.trim()?.lowercase().orEmpty()) {
+            "wy", "netease", "neteasecloudmusic", "netease_cloud_music", "cloud", "wangyi", "163" -> "wy"
+            "tx", "qq", "qqmusic", "qq_music", "tencent" -> "tx"
+            "kg", "kugou", "kugoumusic", "kugou_music" -> "kg"
+            else -> null
+        }
 
     private fun urlEncoded(value: String): String = Http.formEncode(value)
 

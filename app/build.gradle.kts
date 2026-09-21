@@ -15,8 +15,8 @@ android {
         applicationId = "com.lulu.music"
         minSdk = 24
         targetSdk = 35
-        versionCode = 42
-        versionName = "1.6.9"
+        versionCode = 45
+        versionName = "1.8.1"
         vectorDrawables { useSupportLibrary = true }
     }
 

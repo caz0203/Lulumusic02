@@ -157,6 +157,40 @@ object LxScriptRunner {
         }
     }
 
+    /**
+     * 只做「脚本能否求值」的轻量探测：引导脚本 + 音源脚本进 WebView 跑一次，
+     * 返回 JS 侧的错误原文；成功返回 null。
+     *
+     * 这是**结构检查之外最便宜**的脚本验证手段：不构造 `musicUrl` 载荷、不发起任何网络请求，
+     * 因此不会打到第三方接口——只暴露脚本自身的语法错误 / 加载期异常
+     * （比如 `MusicPlugin` 定义里引用了不存在的全局变量）。
+     *
+     * 有意**不复用** [invoke] 的 `preparedKeys` 短路：那里缓存的是「已注入过」，
+     * 一旦某个音源曾经注入成功，后续再调用就会直接下发 invocation 而跳过求值，
+     * 拿不到脚本本身是否还能解析的结论。这里每次显式重新求值。
+     *
+     * 首次调用会在主线程创建 WebView（几百毫秒量级），只应由用户显式触发的检查调用。
+     */
+    suspend fun prepareScript(source: ThirdPartySource): String? {
+        val script = source.script?.trim().orEmpty()
+        if (script.isEmpty()) return "脚本内容为空"
+        return runCatching {
+            gate.withLock {
+                val web = ensureWebView() ?: return@withLock "WebView 不可用"
+                if (!bootstrapDone) {
+                    val bootstrapError = decodeJsString(evaluate(web, bootstrapJs()))
+                    if (!bootstrapError.isNullOrEmpty()) Log.d(TAG, "引导脚本执行异常：$bootstrapError")
+                    bootstrapDone = true
+                }
+                val key = cacheKey(source, script)
+                decodeJsString(evaluate(web, buildPrepareJs(key, script, source))).orEmpty()
+            }
+        }.getOrElse { t ->
+            Log.d(TAG, "第三方脚本求值失败：${source.name} ${t.message ?: t}")
+            t.message ?: t.toString()
+        }
+    }
+
     // ---------------------------------------------------------------------
     // WebView 生命周期
     // ---------------------------------------------------------------------

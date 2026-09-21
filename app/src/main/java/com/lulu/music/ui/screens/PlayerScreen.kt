@@ -3,17 +3,19 @@ package com.lulu.music.ui.screens
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -23,22 +25,22 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.PlaylistPlay
-import androidx.compose.material.icons.rounded.Repeat
-import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -52,8 +54,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +78,7 @@ import com.lulu.music.data.store.FavoritesStore
 import com.lulu.music.playback.DownloadManager
 import com.lulu.music.playback.PlaybackController
 import com.lulu.music.playback.RepeatMode
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCoverImage
 import com.lulu.music.ui.components.BeansGlass
@@ -83,13 +88,20 @@ import com.lulu.music.ui.components.BeansToastCenter
 import com.lulu.music.ui.components.BeansVIPBadge
 import com.lulu.music.ui.theme.BeansTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
- * Full-screen player, port of the iOS `PlayerView` core: cover art, transport, seek bar, favourite,
- * shuffle/repeat, speed, sleep timer, queue, and the scrolling lyric sheet with translation.
+ * 全屏播放器，移植 iOS `PlayerView` 的核心：封面 / 歌词 / 黑胶 / 极简四种版式，
+ * 传输控制、可拖动进度条、收藏、随机 / 循环、倍速、定时关闭、播放队列，
+ * 以及带翻译的滚动歌词。
+ *
+ * 版式通过 [SettingsStore.playerLayout]（key `beans.playerLayout`）持久化：
+ * 顶栏的版式按钮打开 [PlayerLayoutSheet]，设置页「播放设置」里写入同一个 key。
+ *
+ * @param onDismiss 关闭播放页（下拉手势 / 顶栏返回按钮）
  */
 @Composable
 fun BeansPlayerScreen(onDismiss: () -> Unit) {
@@ -111,20 +123,25 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
     val lyricAlign by SettingsStore.lyricsAlign.collectAsState()
     val lyricTranslation by SettingsStore.lyricsTranslation.collectAsState()
     val lyricOffset by SettingsStore.lyricOffset.collectAsState()
+    val audioQuality by SettingsStore.audioQuality.collectAsState()
+    val layoutRaw by SettingsStore.playerLayout.collectAsState()
+    val layout = PlayerLayout.fromRaw(layoutRaw)
 
     var showLyrics by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showSpeed by remember { mutableStateOf(false) }
     var showSleep by remember { mutableStateOf(false) }
+    var showLayouts by remember { mutableStateOf(false) }
 
     var lyrics by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
     var lyricError by remember { mutableStateOf<String?>(null) }
     var isLiked by remember { mutableStateOf(false) }
+    var commentCount by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
 
     val current = song
 
-    // Load lyrics whenever the track changes.
+    // 歌词：随曲目变化重新拉取。
     LaunchedEffect(current?.identityKey) {
         lyrics = emptyList()
         lyricError = null
@@ -142,12 +159,43 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
         isLiked = FavoritesStore.isLiked(current)
     }
 
+    // 评论数：只有网易云有现成的 total；失败时静默保持 null（只显示图标）。
+    LaunchedEffect(current?.identityKey) {
+        commentCount = null
+        val s = current ?: return@LaunchedEffect
+        if (s.source != SongSource.NET_EASE) return@LaunchedEffect
+        commentCount = withContext(Dispatchers.IO) { PlayerCommentCounts.count(s) }
+    }
+
     val progressSeconds = positionMs / 1000.0
     val durationSeconds = if (durationMs > 0) durationMs / 1000.0 else (current?.duration ?: 0.0)
+    val qualityLabel = audioQualityLabel(audioQuality)
+
+    // 「歌词优先」整屏歌词；其余版式沿用「封面 / 黑胶 / 极简」+ 点击切换歌词的状态。
+    val lyricsMode = showLyrics || layout == PlayerLayout.LYRICS
+
+    val toggleFavorite: () -> Unit = {
+        BeansHaptics.tap()
+        val target = current ?: Unit
+        if (target is Song) {
+            // 乐观更新；网易云拒绝时 FavoritesStore 会回滚。
+            isLiked = !isLiked
+            scope.launch {
+                val ok = FavoritesStore.toggle(target)
+                isLiked = FavoritesStore.isLiked(target)
+                if (!ok) {
+                    BeansToastCenter.show(beansLocalized("收藏失败", "Could not update favourite"))
+                }
+            }
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Ambient background derived from the artwork.
+        // 跟随封面的氛围背景；黑胶 / 歌词版式再叠一层深靛蓝。
         PlayerBackground(coverURL = current?.coverURL)
+        if (layout == PlayerLayout.VINYL || layout == PlayerLayout.LYRICS) {
+            VinylBackdropOverlay()
+        }
 
         Column(
             modifier = Modifier
@@ -156,38 +204,76 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
                 .padding(horizontal = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // ---- top bar -------------------------------------------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BeansGlassIconButton(
-                    icon = Icons.Rounded.KeyboardArrowDown,
-                    onClick = onDismiss,
-                    size = 40.dp,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = sourceLabel(current?.source),
-                    color = colors.comment,
-                    fontSize = 12.sp,
-                )
-                Spacer(Modifier.weight(1f))
-                BeansGlassIconButton(
-                    icon = Icons.Rounded.PlaylistPlay,
-                    onClick = { showQueue = true },
-                    size = 40.dp,
-                    active = showQueue,
-                )
-            }
+            // ---- 顶栏 -----------------------------------------------------
+            PlayerTopBar(
+                sourceText = sourceLabel(current?.source),
+                queueOpen = showQueue,
+                onDismiss = onDismiss,
+                onOpenLayouts = { showLayouts = true },
+                onOpenQueue = { showQueue = true },
+            )
 
-            Spacer(Modifier.weight(1f))
+            // ---- 中间内容（四种版式） ---------------------------------------
+            when (layout) {
+                PlayerLayout.VINYL -> {
+                    // 信息行放在唱盘上方（与参考图一致：歌名 / 关注 / 红心在最上面）。
+                    PlayerNowPlayingRow(
+                        song = current,
+                        isLiked = isLiked,
+                        likeCount = null,
+                        commentCount = commentCount,
+                        foreground = PlayerOnVinylLabel,
+                        onToggleFavorite = toggleFavorite,
+                        onComment = { PlayerCommentCounts.showToast(commentCount) },
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                    VinylStage(
+                        coverURL = current?.coverURL,
+                        // 歌词浮层盖住唱盘时暂停转动：不可见时没必要继续跑动画。
+                        isPlaying = isPlaying && !showLyrics,
+                        trackKey = current?.identityKey,
+                        onTap = { showLyrics = !showLyrics },
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                    )
+                }
 
-            // ---- cover / lyrics ------------------------------------------
-            Crossfade(targetState = showLyrics, label = "coverLyrics") { lyricsMode ->
-                if (lyricsMode) {
+                PlayerLayout.MINIMAL -> {
+                    Spacer(Modifier.weight(1f))
+                    BeansCoverImage(
+                        url = current?.coverURL,
+                        size = 150.dp,
+                        cornerRadius = 18.dp,
+                        modifier = Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { showLyrics = true },
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    PlayerNowPlayingRow(
+                        song = current,
+                        isLiked = isLiked,
+                        compact = true,
+                        likeCount = null,
+                        commentCount = commentCount,
+                        onToggleFavorite = toggleFavorite,
+                        onComment = { PlayerCommentCounts.showToast(commentCount) },
+                    )
+                    Spacer(Modifier.weight(1f))
+                }
+
+                // ---- 歌词优先：整屏歌词，底部仍是同一套信息行 / 进度 / 控制 -----
+                PlayerLayout.LYRICS -> {
+                    PlayerNowPlayingRow(
+                        song = current,
+                        isLiked = isLiked,
+                        compact = true,
+                        likeCount = null,
+                        commentCount = commentCount,
+                        foreground = PlayerOnVinylLabel,
+                        onToggleFavorite = toggleFavorite,
+                        onComment = { PlayerCommentCounts.showToast(commentCount) },
+                        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                    )
                     LyricsSection(
                         lyrics = lyrics,
                         errorText = lyricError,
@@ -196,227 +282,158 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
                         showTranslation = lyricTranslation,
                         fontSize = lyricFontSize,
                         align = lyricAlign,
+                        hint = beansLocalized("长按屏幕分享歌词", "Long-press to share the lyrics"),
                         onSeek = { line ->
                             BeansHaptics.tap()
                             PlaybackController.seekTo(
                                 (LyricTiming.seekTime(line, lyricOffset.toDouble()) * 1000).toLong(),
                             )
                         },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(330.dp),
+                        modifier = Modifier.fillMaxWidth().weight(1f),
                     )
-                } else {
-                    val interaction = remember { MutableInteractionSource() }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        BeansCoverImage(
-                            url = current?.coverURL,
-                            size = 300.dp,
-                            cornerRadius = 22.dp,
-                            modifier = Modifier.clickable(
-                                interactionSource = interaction,
-                                indication = null,
-                            ) { showLyrics = true },
-                        )
-                    }
                 }
-            }
 
-            Spacer(Modifier.weight(1f))
-
-            // ---- title / artists ------------------------------------------
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text = current?.name ?: beansLocalized("未在播放", "Nothing playing"),
-                        color = colors.label,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = current?.artists.orEmpty(),
-                            color = colors.comment,
-                            fontSize = 13.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (current?.isVIP == true) {
-                            Spacer(Modifier.width(6.dp))
-                            BeansVIPBadge(text = "VIP")
-                        }
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(14.dp))
-
-            // ---- seek ------------------------------------------------------
-            var dragValue by remember { mutableStateOf<Float?>(null) }
-            val shown = dragValue ?: progressSeconds.toFloat()
-            Slider(
-                value = shown.coerceIn(0f, maxOf(durationSeconds.toFloat(), 0.1f)),
-                onValueChange = { dragValue = it },
-                onValueChangeFinished = {
-                    dragValue?.let { PlaybackController.seekTo((it * 1000).toLong()) }
-                    dragValue = null
-                },
-                valueRange = 0f..maxOf(durationSeconds.toFloat(), 0.1f),
-                colors = SliderDefaults.colors(
-                    thumbColor = colors.accent,
-                    activeTrackColor = colors.accent,
-                    inactiveTrackColor = colors.comment.copy(alpha = 0.28f),
-                ),
-            )
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = formatTime(shown.toDouble()),
-                    color = colors.comment,
-                    fontSize = 11.sp,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = formatTime(durationSeconds),
-                    color = colors.comment,
-                    fontSize = 11.sp,
-                )
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            // ---- transport -------------------------------------------------
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BeansGlassIconButton(
-                    icon = Icons.Rounded.Shuffle,
-                    onClick = {
-                        BeansHaptics.tap()
-                        PlaybackController.setShuffle(!shuffle)
-                    },
-                    size = 42.dp,
-                    active = shuffle,
-                )
-                BeansGlassIconButton(
-                    icon = Icons.Rounded.SkipPrevious,
-                    onClick = {
-                        BeansHaptics.tap()
-                        PlaybackController.previous()
-                    },
-                    size = 46.dp,
-                )
-                PlayPauseButton(
-                    isPlaying = isPlaying,
-                    isBuffering = isBuffering,
-                    onClick = {
-                        BeansHaptics.tap()
-                        PlaybackController.togglePlayPause()
-                    },
-                )
-                BeansGlassIconButton(
-                    icon = Icons.Rounded.SkipNext,
-                    onClick = {
-                        BeansHaptics.tap()
-                        PlaybackController.next()
-                    },
-                    size = 46.dp,
-                )
-                BeansGlassIconButton(
-                    icon = if (repeatMode == RepeatMode.ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                    onClick = {
-                        BeansHaptics.tap()
-                        PlaybackController.cycleRepeatMode()
-                    },
-                    size = 42.dp,
-                    active = repeatMode != RepeatMode.OFF,
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            // ---- secondary actions -----------------------------------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 18.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BeansGlassIconButton(
-                    icon = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                    onClick = {
-                        BeansHaptics.tap()
-                        val target = current ?: return@BeansGlassIconButton
-                        // Optimistic UI; FavoritesStore rolls NetEase back if the cloud rejects it.
-                        isLiked = !isLiked
-                        scope.launch {
-                            val ok = FavoritesStore.toggle(target)
-                            isLiked = FavoritesStore.isLiked(target)
-                            if (!ok) {
-                                BeansToastCenter.show(
-                                    beansLocalized("收藏失败", "Could not update favourite"),
+                // ---- 专辑封面：封面 / 歌词相互切换（原版式） --------------------
+                PlayerLayout.COVER -> {
+                    Spacer(Modifier.weight(1f))
+                    Crossfade(targetState = showLyrics, label = "coverLyrics") { lyricsOn ->
+                        if (lyricsOn) {
+                            LyricsSection(
+                                lyrics = lyrics,
+                                errorText = lyricError,
+                                progress = progressSeconds,
+                                userOffset = lyricOffset.toDouble(),
+                                showTranslation = lyricTranslation,
+                                fontSize = lyricFontSize,
+                                align = lyricAlign,
+                                onSeek = { line ->
+                                    BeansHaptics.tap()
+                                    PlaybackController.seekTo(
+                                        (LyricTiming.seekTime(line, lyricOffset.toDouble()) * 1000).toLong(),
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(330.dp),
+                            )
+                        } else {
+                            val interaction = remember { MutableInteractionSource() }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                BeansCoverImage(
+                                    url = current?.coverURL,
+                                    size = 300.dp,
+                                    cornerRadius = 22.dp,
+                                    modifier = Modifier.clickable(
+                                        interactionSource = interaction,
+                                        indication = null,
+                                    ) { showLyrics = true },
                                 )
                             }
                         }
-                    },
-                    size = 40.dp,
-                    active = isLiked,
-                )
-                val dlTask = current?.let { downloadTasks[it.identityKey] }
-                val downloaded = dlTask?.state == DownloadManager.State.DONE
-                BeansGlassIconButton(
-                    icon = if (downloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
-                    onClick = {
-                        BeansHaptics.tap()
-                        val target = current ?: return@BeansGlassIconButton
+                    }
+                    Spacer(Modifier.weight(1f))
+
+                    if (!showLyrics) {
+                        PlayerInfoRow(
+                            song = current,
+                            isLiked = isLiked,
+                            likeCount = null,
+                            commentCount = commentCount,
+                            onToggleFavorite = toggleFavorite,
+                            onComment = { PlayerCommentCounts.showToast(commentCount) },
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
+            }
+
+            // ---- 进度（左时间 / 中音质 / 右总时长） --------------------------
+            PlayerProgressRow(
+                positionSeconds = progressSeconds,
+                durationSeconds = durationSeconds,
+                qualityLabel = qualityLabel,
+                onSeek = { PlaybackController.seekTo((it * 1000).toLong()) },
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            // ---- 传输控制 ---------------------------------------------------
+            PlayerTransportRow(
+                isPlaying = isPlaying,
+                isBuffering = isBuffering,
+                shuffle = shuffle,
+                repeatMode = repeatMode,
+                onToggleShuffle = {
+                    BeansHaptics.tap()
+                    PlaybackController.setShuffle(!shuffle)
+                },
+                onPrevious = {
+                    BeansHaptics.tap()
+                    PlaybackController.previous()
+                },
+                onTogglePlayPause = {
+                    BeansHaptics.tap()
+                    PlaybackController.togglePlayPause()
+                },
+                onNext = {
+                    BeansHaptics.tap()
+                    PlaybackController.next()
+                },
+                onCycleRepeat = {
+                    BeansHaptics.tap()
+                    PlaybackController.cycleRepeatMode()
+                },
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            // ---- 次要操作 ---------------------------------------------------
+            PlayerSecondaryActions(
+                speed = speed,
+                sleepRemaining = sleepRemaining,
+                lyricsActive = lyricsMode,
+                downloaded = current?.let { downloadTasks[it.identityKey] }
+                    ?.state == DownloadManager.State.DONE,
+                onDownload = {
+                    BeansHaptics.tap()
+                    current?.let { target ->
                         if (DownloadManager.isDownloaded(target)) {
                             DownloadManager.delete(target)
-                            BeansToastCenter.show(
-                                beansLocalized("已删除下载", "Download removed"),
-                            )
+                            BeansToastCenter.show(beansLocalized("已删除下载", "Download removed"))
                         } else {
                             DownloadManager.download(target)
-                            BeansToastCenter.show(
-                                beansLocalized("开始下载", "Download started"),
-                            )
+                            BeansToastCenter.show(beansLocalized("开始下载", "Download started"))
                         }
-                    },
-                    size = 40.dp,
-                    active = downloaded,
-                )
-                PlayerTextButton(
-                    label = "${String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.')}x",
-                    active = kotlin.math.abs(speed - 1f) > 0.01f,
-                    onClick = { showSpeed = true },
-                )
-                PlayerTextButton(
-                    label = if (sleepRemaining > 0) formatTime(sleepRemaining / 1000.0) else "Z",
-                    active = sleepRemaining > 0,
-                    onClick = { showSleep = true },
-                )
-                PlayerTextButton(
-                    label = beansLocalized("词", "Ly"),
-                    active = showLyrics,
-                    onClick = { showLyrics = !showLyrics },
-                )
-            }
+                    }
+                },
+                onOpenSpeed = { showSpeed = true },
+                onOpenSleep = { showSleep = true },
+                onToggleLyrics = {
+                    if (layout == PlayerLayout.LYRICS) {
+                        // 歌词优先版式：点了就切回封面版式，避免被困在整屏歌词里。
+                        SettingsStore.setPlayerLayout(PlayerLayout.COVER.raw)
+                    } else {
+                        showLyrics = !showLyrics
+                    }
+                },
+            )
         }
     }
 
-    // ---- sheets ----------------------------------------------------------
+    // ---- 面板 --------------------------------------------------------------
+    if (showLayouts) {
+        PlayerLayoutSheet(
+            current = layout,
+            onPick = { SettingsStore.setPlayerLayout(it.raw) },
+            onDismiss = { showLayouts = false },
+        )
+    }
+
     if (showQueue) {
         BeansBottomSheet(onDismissRequest = { showQueue = false }) {
             QueueSheetContent(
@@ -425,6 +442,8 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
                 onSelect = { index ->
                     BeansHaptics.tap()
                     PlaybackController.play(queue, index)
+                    // 播放页已经在前台时 BeansApp 会忽略这次请求（不会叠出第二层播放页）。
+                    PlayerOpenRequest.request()
                 },
                 onRemove = { index -> PlaybackController.removeFromQueue(index) },
                 onClear = { PlaybackController.clearQueue() },
@@ -463,7 +482,244 @@ fun BeansPlayerScreen(onDismiss: () -> Unit) {
     }
 }
 
-/** Compact circular text button (speed / sleep / lyrics toggles). */
+// ---------------------------------------------------------------------------------------------
+// MARK: - 播放页组件
+// ---------------------------------------------------------------------------------------------
+
+/** 顶栏：收起 / 来源 / 版式切换 / 队列。 */
+@Composable
+private fun PlayerTopBar(
+    sourceText: String,
+    queueOpen: Boolean,
+    onDismiss: () -> Unit,
+    onOpenLayouts: () -> Unit,
+    onOpenQueue: () -> Unit,
+) {
+    val colors = BeansTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BeansGlassIconButton(
+            icon = Icons.Rounded.KeyboardArrowDown,
+            onClick = onDismiss,
+            size = 40.dp,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = sourceText,
+            color = colors.comment,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.weight(1f))
+        BeansGlassIconButton(
+            icon = Icons.Rounded.Tune,
+            onClick = {
+                BeansHaptics.tap()
+                onOpenLayouts()
+            },
+            size = 40.dp,
+        )
+        Spacer(Modifier.width(8.dp))
+        BeansGlassIconButton(
+            icon = Icons.AutoMirrored.Rounded.PlaylistPlay,
+            onClick = onOpenQueue,
+            size = 40.dp,
+            active = queueOpen,
+        )
+    }
+}
+
+/**
+ * 黑胶舞台：按可用宽高算出唱片直径，保证唱臂与唱盘都不会溢出。
+ *
+ * 高度预算：`唱盘 + 唱臂上探 + 呼吸间距` ≈ `discSize * 1.55`，因此
+ * `discSize = min(可用宽 * 0.92, 可用高 / 1.55, 300dp)`。
+ */
+@Composable
+private fun VinylStage(
+    coverURL: String?,
+    isPlaying: Boolean,
+    trackKey: String?,
+    onTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        // Dp 只能用 minOf / maxOf，不能用 kotlin.math。
+        val discSize = maxOf(
+            140.dp,
+            minOf(
+                maxWidth * 0.92f,
+                maxHeight / 1.55f,
+                300.dp,
+            ),
+        )
+        VinylPlayerView(
+            coverURL = coverURL,
+            isPlaying = isPlaying,
+            trackKey = trackKey,
+            discSize = discSize,
+            onTap = onTap,
+        )
+    }
+}
+
+/**
+ * 专辑封面版式的信息行：保留原来的居中排版（歌名 / VIP / 歌手），
+ * 右侧补上「红心（可切换收藏）」与「评论气泡」，与参考图一致。
+ */
+@Composable
+private fun PlayerInfoRow(
+    song: Song?,
+    isLiked: Boolean,
+    likeCount: Int?,
+    commentCount: Int?,
+    onToggleFavorite: () -> Unit,
+    onComment: () -> Unit,
+) {
+    val colors = BeansTheme.colors
+
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.weight(1f),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = song?.name ?: beansLocalized("未在播放", "Nothing playing"),
+                color = colors.label,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = song?.artists.orEmpty(),
+                    color = colors.comment,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (song?.isVIP == true) {
+                    Spacer(Modifier.width(6.dp))
+                    BeansVIPBadge(text = "VIP")
+                }
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        BeansGlassIconButton(
+            icon = if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+            onClick = onToggleFavorite,
+            size = 38.dp,
+            active = isLiked,
+        )
+        Spacer(Modifier.width(6.dp))
+        BeansGlassIconButton(
+            icon = Icons.Rounded.ChatBubbleOutline,
+            onClick = onComment,
+            size = 38.dp,
+        )
+    }
+}
+
+/** 传输控制行：随机 / 上一首 / 播放暂停 / 下一首 / 循环。 */
+@Composable
+private fun PlayerTransportRow(
+    isPlaying: Boolean,
+    isBuffering: Boolean,
+    shuffle: Boolean,
+    repeatMode: RepeatMode,
+    onToggleShuffle: () -> Unit,
+    onPrevious: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onCycleRepeat: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BeansGlassIconButton(
+            icon = Icons.Rounded.Shuffle,
+            onClick = onToggleShuffle,
+            size = 42.dp,
+            active = shuffle,
+        )
+        BeansGlassIconButton(
+            icon = Icons.Rounded.SkipPrevious,
+            onClick = onPrevious,
+            size = 46.dp,
+        )
+        PlayPauseButton(
+            isPlaying = isPlaying,
+            isBuffering = isBuffering,
+            onClick = onTogglePlayPause,
+        )
+        BeansGlassIconButton(
+            icon = Icons.Rounded.SkipNext,
+            onClick = onNext,
+            size = 46.dp,
+        )
+        BeansGlassIconButton(
+            icon = if (repeatMode == RepeatMode.ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
+            onClick = onCycleRepeat,
+            size = 42.dp,
+            active = repeatMode != RepeatMode.OFF,
+        )
+    }
+}
+
+/** 次要操作行：下载 / 倍速 / 定时关闭 / 歌词。 */
+@Composable
+private fun PlayerSecondaryActions(
+    speed: Float,
+    sleepRemaining: Long,
+    lyricsActive: Boolean,
+    downloaded: Boolean,
+    onDownload: () -> Unit,
+    onOpenSpeed: () -> Unit,
+    onOpenSleep: () -> Unit,
+    onToggleLyrics: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 18.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BeansGlassIconButton(
+            icon = if (downloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
+            onClick = onDownload,
+            size = 40.dp,
+            active = downloaded,
+        )
+        PlayerTextButton(
+            label = "${String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.')}x",
+            active = kotlin.math.abs(speed - 1f) > 0.01f,
+            onClick = onOpenSpeed,
+        )
+        PlayerTextButton(
+            label = if (sleepRemaining > 0) formatPlayerTime(sleepRemaining / 1000.0) else "Z",
+            active = sleepRemaining > 0,
+            onClick = onOpenSleep,
+        )
+        PlayerTextButton(
+            label = beansLocalized("词", "Ly"),
+            active = lyricsActive,
+            onClick = onToggleLyrics,
+        )
+    }
+}
+
+/** 紧凑圆形文字按钮（倍速 / 定时 / 歌词）。 */
 @Composable
 private fun PlayerTextButton(label: String, active: Boolean, onClick: () -> Unit) {
     val colors = BeansTheme.colors
@@ -513,7 +769,7 @@ private fun PlayPauseButton(isPlaying: Boolean, isBuffering: Boolean, onClick: (
     }
 }
 
-/** Ambient gradient + blurred artwork behind the player. */
+/** 跟随封面的环境渐变 + 模糊封面。 */
 @Composable
 private fun PlayerBackground(coverURL: String?) {
     val colors = BeansTheme.colors
@@ -556,11 +812,13 @@ private fun PlayerBackground(coverURL: String?) {
 }
 
 /**
- * Scrolling lyrics with the current line highlighted and centred.
+ * 滚动歌词：当前行高亮居中。
  *
- * Port of the iOS `LyricsSection`: the current line is found by binary search over the effective
- * (offset-applied) progress, only the current line shows its translation, and non-current lines
- * fade with distance from the focus line.
+ * 移植 iOS `LyricsSection`：按（叠加偏移后的）进度二分查找当前行、只有当前行显示翻译、
+ * 其余行按与当前行的距离淡出。
+ *
+ * 长按复制全部歌词（对应参考图里「长按屏幕分享歌词」的提示）；
+ * 单击某一行仍然跳转到该行（原有行为，未改动）。
  */
 @Composable
 fun LyricsSection(
@@ -573,9 +831,17 @@ fun LyricsSection(
     align: String,
     onSeek: (LyricLine) -> Unit,
     modifier: Modifier = Modifier,
+    hint: String? = null,
 ) {
     val colors = BeansTheme.colors
     val listState = rememberLazyListState()
+    val clipboard = LocalClipboardManager.current
+
+    val textAlign = when (align) {
+        "left" -> TextAlign.Start
+        "right" -> TextAlign.End
+        else -> TextAlign.Center
+    }
 
     if (lyrics.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
@@ -593,7 +859,7 @@ fun LyricsSection(
 
     LaunchedEffect(currentIndex) {
         if (currentIndex >= 0 && currentIndex < lyrics.size) {
-            // Keep the active line vertically centred.
+            // 让当前行保持在垂直中线附近。
             runCatching {
                 listState.animateScrollToItem(
                     index = currentIndex,
@@ -603,69 +869,89 @@ fun LyricsSection(
         }
     }
 
-    val textAlign = when (align) {
-        "left" -> TextAlign.Start
-        "right" -> TextAlign.End
-        else -> TextAlign.Center
-    }
-
-    LazyColumn(
-        state = listState,
-        modifier = modifier,
-        contentPadding = PaddingValues(vertical = 150.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        itemsIndexed(lyrics) { index, line ->
-            val isCurrent = index == currentIndex
-            val distance = kotlin.math.abs(index - currentIndex)
-            val alpha = when {
-                isCurrent -> 1f
-                distance == 1 -> 0.55f
-                distance == 2 -> 0.32f
-                else -> 0.18f
-            }
-            val interaction = remember(line.id) { MutableInteractionSource() }
-            Column(
+    Column(modifier = modifier) {
+        if (hint != null) {
+            Text(
+                text = hint,
+                color = colors.comment,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(
-                        interactionSource = interaction,
-                        indication = null,
-                    ) { onSeek(line) }
-                    .padding(vertical = 7.dp, horizontal = 12.dp),
-                horizontalAlignment = when (textAlign) {
-                    TextAlign.Start -> Alignment.Start
-                    TextAlign.End -> Alignment.End
-                    else -> Alignment.CenterHorizontally
+                    .padding(bottom = 6.dp),
+            )
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .pointerInput(lyrics) {
+                    detectTapGestures(
+                        onLongPress = {
+                            clipboard.setText(AnnotatedString(lyrics.joinToString("\n") { it.text }))
+                            BeansHaptics.tap()
+                            BeansToastCenter.show(
+                                beansLocalized("歌词已复制", "Lyrics copied"),
+                            )
+                        },
+                    )
                 },
-            ) {
-                Text(
-                    text = line.text.ifBlank { "♪" },
-                    color = if (isCurrent) colors.accent else colors.label,
-                    fontSize = (if (isCurrent) fontSize + 3f else fontSize).sp,
-                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = textAlign,
+            contentPadding = PaddingValues(vertical = 120.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            itemsIndexed(lyrics) { index, line ->
+                val isCurrent = index == currentIndex
+                val distance = kotlin.math.abs(index - currentIndex)
+                val alpha = when {
+                    isCurrent -> 1f
+                    distance == 1 -> 0.55f
+                    distance == 2 -> 0.32f
+                    else -> 0.18f
+                }
+                val interaction = remember(line.id) { MutableInteractionSource() }
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .graphicsLayer { this.alpha = alpha },
-                )
-                val translation = line.translation
-                if (isCurrent && showTranslation && !translation.isNullOrEmpty()) {
-                    Spacer(Modifier.height(3.dp))
+                        .clickable(
+                            interactionSource = interaction,
+                            indication = null,
+                        ) { onSeek(line) }
+                        .padding(vertical = 7.dp, horizontal = 12.dp),
+                    horizontalAlignment = when (textAlign) {
+                        TextAlign.Start -> Alignment.Start
+                        TextAlign.End -> Alignment.End
+                        else -> Alignment.CenterHorizontally
+                    },
+                ) {
                     Text(
-                        text = translation,
-                        color = colors.comment,
-                        fontSize = (fontSize - 3f).sp,
+                        text = line.text.ifBlank { "♪" },
+                        color = if (isCurrent) colors.accent else colors.label,
+                        fontSize = (if (isCurrent) fontSize + 3f else fontSize).sp,
+                        fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
                         textAlign = textAlign,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .graphicsLayer { this.alpha = alpha },
                     )
+                    val translation = line.translation
+                    if (isCurrent && showTranslation && !translation.isNullOrEmpty()) {
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            text = translation,
+                            color = colors.comment,
+                            fontSize = (fontSize - 3f).sp,
+                            textAlign = textAlign,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/** Binary search for the last line whose timestamp has passed. */
+/** 二分查找最后一个时间戳已过的行。 */
 private fun currentLyricIndex(lyrics: List<LyricLine>, progress: Double): Int {
     if (lyrics.isEmpty()) return -1
     var low = 0
@@ -683,7 +969,7 @@ private fun currentLyricIndex(lyrics: List<LyricLine>, progress: Double): Int {
     return result
 }
 
-/** Fetch lyrics for whichever platform the track came from. */
+/** 按曲目来源拉取歌词。 */
 private suspend fun loadLyrics(song: Song): List<LyricLine> = when (song.source) {
     SongSource.NET_EASE -> {
         val result = NetEaseApi.lyricWithTranslation(song.id)
@@ -699,6 +985,37 @@ private suspend fun loadLyrics(song: Song): List<LyricLine> = when (song.source)
         val hash = song.kugouHash
         if (hash.isNullOrBlank()) emptyList()
         else LyricParser.parse(KugouMusicApi.lyric(hash, song.duration))
+    }
+}
+
+/**
+ * 评论数缓存（**可选**功能）。
+ *
+ * 参考图里的点赞数（`650w+`）在本项目中没有任何数据源：`Song` 模型没有点赞字段，
+ * 也没有对应的接口，因此点赞只画图标不画数字，绝不臆造数据。
+ * 评论数则可以从既有的 [NetEaseApi.songComments] 的 `total` 拿到，成本很低（每首歌一次），
+ * 于是按曲目 id 做进程内缓存，失败时静默返回 null。
+ */
+private object PlayerCommentCounts {
+
+    private val cache = mutableMapOf<Long, Int?>()
+
+    suspend fun count(song: Song): Int? {
+        synchronized(cache) { cache[song.id]?.let { return it } }
+        val total = runCatching { NetEaseApi.songComments(song.id, limit = 1, offset = 0).total }
+            .getOrNull()
+        synchronized(cache) { cache[song.id] = total }
+        return total
+    }
+
+    fun showToast(count: Int?) {
+        BeansToastCenter.show(
+            if (count != null) {
+                beansLocalized("共 $count 条评论", "$count comments")
+            } else {
+                beansLocalized("评论加载中", "Loading comments")
+            },
+        )
     }
 }
 
@@ -859,9 +1176,4 @@ private fun sourceLabel(source: SongSource?): String = when (source) {
     SongSource.QQ -> "QQ 音乐"
     SongSource.KUGOU -> "酷狗音乐"
     null -> ""
-}
-
-private fun formatTime(seconds: Double): String {
-    val total = seconds.coerceAtLeast(0.0).toInt()
-    return "%d:%02d".format(total / 60, total % 60)
 }

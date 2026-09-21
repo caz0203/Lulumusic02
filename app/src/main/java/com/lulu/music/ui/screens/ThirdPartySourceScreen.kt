@@ -4,7 +4,13 @@ import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -26,10 +33,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -41,6 +53,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -49,7 +62,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -64,9 +79,13 @@ import com.lulu.music.data.model.beansLocalized
 import com.lulu.music.data.net.Http
 import com.lulu.music.data.prefs.BeansUIStyle
 import com.lulu.music.data.prefs.SettingsStore
+import com.lulu.music.data.source.SourceHealth
+import com.lulu.music.data.source.SourceHealthChecker
 import com.lulu.music.data.source.ThirdPartySource
 import com.lulu.music.data.source.UnblockSourceStore
 import com.lulu.music.data.source.ThirdPartySourceImportParser
+import com.lulu.music.data.source.checkHealth
+import com.lulu.music.data.source.displayText
 import com.lulu.music.data.store.CrashLog
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCapsule
@@ -134,6 +153,70 @@ fun ThirdPartySourceScreen(onBack: () -> Unit) {
     var editorTarget by remember { mutableStateOf<ThirdPartySource?>(null) }
     var pendingDelete by remember { mutableStateOf<ThirdPartySource?>(null) }
 
+    // 能力详情弹窗（「支持：…」那一行点开看全部）。
+    var capabilityDetail by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    // 健康检查结果与「正在检查」标记，按音源 id 键住。
+    //
+    // 放 state map 而不是每行各自 remember：列表排序 / 增删都会重建 row，
+    // 行内 remember 会被丢掉并触发重新检查；键在音源 id 上才能跨重组保留。
+    val healthMap = remember { mutableStateMapOf<String, SourceHealth>() }
+    val checkingIds = remember { mutableStateMapOf<String, Boolean>() }
+    var checkingAll by remember { mutableStateOf(false) }
+
+    /**
+     * 检查单个音源。
+     *
+     * [deep] 为 true 时只对脚本音源做「WebView 求值」探测（用户点盾牌图标才走这条路）；
+     * 其余情况都是纯本地结构检查。计算在 IO 线程，状态更新回到主线程。
+     */
+    fun runHealthCheck(source: ThirdPartySource, deep: Boolean) {
+        if (checkingIds[source.id] == true) return
+        checkingIds[source.id] = true
+        scope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) { checkHealth(source, deep = deep) }
+            } catch (error: Throwable) {
+                CrashLog.write(error)
+                SourceHealth.Failed("检查失败：${errorDetail(error)}")
+            }
+            healthMap[source.id] = result
+            checkingIds[source.id] = false
+        }
+    }
+
+    /** 「全部检查」：对所有音源跑结构检查（不触发 WebView，因此既快又不会打第三方接口）。 */
+    fun runCheckAll() {
+        if (checkingAll) return
+        checkingAll = true
+        scope.launch {
+            try {
+                // 先脚本后配置：结论更确定的一类排在前面。
+                val ordered = sources.sortedByDescending { it.isScript }
+                for (source in ordered) {
+                    checkingIds[source.id] = true
+                    val result = try {
+                        withContext(Dispatchers.IO) { checkHealth(source, deep = false) }
+                    } catch (error: Throwable) {
+                        CrashLog.write(error)
+                        SourceHealth.Failed("检查失败：${errorDetail(error)}")
+                    }
+                    healthMap[source.id] = result
+                    checkingIds[source.id] = false
+                }
+                val okCount = ordered.count { healthMap[it.id] is SourceHealth.Ok }
+                val message = beansLocalized(
+                    "已检查 ${ordered.size} 个音源：$okCount 个可用",
+                    "Checked ${ordered.size} sources: $okCount available",
+                )
+                statusText = message
+                BeansToastCenter.show(message)
+            } finally {
+                checkingAll = false
+            }
+        }
+    }
+
     // 已安装的音源决定可选音质集合（对应 iOS `store.supportedQualities`）。
     val availableQualities = remember(sources) {
         runCatching { UnblockSourceStore.availableThirdPartyQualities() }
@@ -141,6 +224,16 @@ fun ThirdPartySourceScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(Unit) { runCatching { UnblockSourceStore.load() } }
+
+    // 首屏先做一遍**结构检查**（纯字符串计算，不联网、不建 WebView），
+    // 这样列表一打开就能看到绿/红结论，而不是一片「尚未检查」。
+    // 用阻塞版 + 主线程：内容很短，不会卡；重活（脚本求值）只走用户点击的 deep 分支。
+    LaunchedEffect(sources) {
+        for (source in sources) {
+            if (healthMap.containsKey(source.id)) continue
+            healthMap[source.id] = SourceHealthChecker.checkHealthCached(source)
+        }
+    }
 
     fun openEditor(source: ThirdPartySource) {
         BeansHaptics.tap()
@@ -355,6 +448,26 @@ fun ThirdPartySourceScreen(onBack: () -> Unit) {
 
                 SourceListCard(
                     sources = sources,
+                    health = healthMap,
+                    checkingIds = checkingIds,
+                    checkingAll = checkingAll,
+                    onCheck = { source -> runHealthCheck(source, deep = false) },
+                    onDeepCheck = { source -> runHealthCheck(source, deep = true) },
+                    onCheckAll = { runCheckAll() },
+                    onShowCapability = { source ->
+                        capabilityDetail = source.name to SourceHealthChecker.capabilityDetailText(
+                            source = source,
+                            header = beansLocalized("支持：", "Supports: "),
+                            basisText = if (SourceHealthChecker.capabilities(source).usesDeclaredQualities) {
+                                beansLocalized("音质来源：音源自身声明", "Qualities: declared by the source")
+                            } else {
+                                beansLocalized(
+                                    "音质来源：平台能力表（音源未声明音质）",
+                                    "Qualities: platform capability table (not declared by the source)",
+                                )
+                            },
+                        )
+                    },
                     onEdit = { openEditor(it) },
                     onMove = { source, by -> runCatching { UnblockSourceStore.moveSource(source.id, by) } },
                     onToggle = { source, enabled ->
@@ -423,6 +536,50 @@ fun ThirdPartySourceScreen(onBack: () -> Unit) {
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
                     Text(text = beansLocalized("取消", "Cancel"), color = colors.comment)
+                }
+            },
+        )
+    }
+
+    // ---------------------------------------------------------------- 能力详情
+    val detail = capabilityDetail
+    if (detail != null) {
+        AlertDialog(
+            onDismissRequest = { capabilityDetail = null },
+            containerColor = colors.card,
+            title = {
+                Text(
+                    text = beansLocalized("支持平台与音质", "Platforms & Qualities"),
+                    color = colors.label,
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = detail.first,
+                        color = colors.label,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = detail.second,
+                        color = colors.comment,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { capabilityDetail = null }) {
+                    Text(text = beansLocalized("知道了", "Got it"), color = colors.accent)
                 }
             },
         )
@@ -703,6 +860,13 @@ private fun ImportCard(
 @Composable
 private fun SourceListCard(
     sources: List<ThirdPartySource>,
+    health: Map<String, SourceHealth>,
+    checkingIds: Map<String, Boolean>,
+    checkingAll: Boolean,
+    onCheck: (ThirdPartySource) -> Unit,
+    onDeepCheck: (ThirdPartySource) -> Unit,
+    onCheckAll: () -> Unit,
+    onShowCapability: (ThirdPartySource) -> Unit,
     onEdit: (ThirdPartySource) -> Unit,
     onMove: (ThirdPartySource, Int) -> Unit,
     onToggle: (ThirdPartySource, Boolean) -> Unit,
@@ -730,14 +894,55 @@ private fun SourceListCard(
                     color = colors.label,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                 )
-                Spacer(Modifier.weight(1f))
                 Text(
                     text = "${sources.size}",
                     color = colors.comment,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
+                Spacer(Modifier.weight(1f))
+                // 「全部检查」只跑结构检查：不联网、不建 WebView，点一下就有结论。
+                BeansCapsule(
+                    modifier = Modifier.beansPressClickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        enabled = !checkingAll && sources.isNotEmpty(),
+                        scale = 0.96f,
+                        onClick = {
+                            BeansHaptics.tap()
+                            onCheckAll()
+                        },
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                    style = style,
+                ) {
+                    if (checkingAll) {
+                        CircularProgressIndicator(
+                            color = colors.accent,
+                            strokeWidth = 1.6.dp,
+                            modifier = Modifier.size(12.dp),
+                        )
+                    } else {
+                        Icon(
+                            imageVector = BeansIcons.of("arrow.clockwise", Icons.Rounded.Refresh),
+                            contentDescription = null,
+                            tint = colors.accent,
+                            modifier = Modifier.size(12.dp),
+                        )
+                    }
+                    Text(
+                        text = if (checkingAll) {
+                            beansLocalized("检查中…", "Checking…")
+                        } else {
+                            beansLocalized("全部检查", "Check All")
+                        },
+                        color = colors.accent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
             }
 
             if (sources.isEmpty()) {
@@ -757,9 +962,14 @@ private fun SourceListCard(
                     sources.forEachIndexed { index, source ->
                         SourceRow(
                             source = source,
+                            health = health[source.id] ?: SourceHealth.Unknown,
+                            checking = checkingIds[source.id] == true,
                             canMoveUp = index > 0,
                             canMoveDown = index < sources.size - 1,
                             style = style,
+                            onCheck = { onCheck(source) },
+                            onDeepCheck = { onDeepCheck(source) },
+                            onShowCapability = { onShowCapability(source) },
                             onEdit = { onEdit(source) },
                             onMoveUp = { onMove(source, -1) },
                             onMoveDown = { onMove(source, 1) },
@@ -773,13 +983,18 @@ private fun SourceListCard(
     }
 }
 
-/** Port of iOS `SourceRow`. */
+/** Port of iOS `SourceRow`（含健康状态行与能力行）。 */
 @Composable
 private fun SourceRow(
     source: ThirdPartySource,
+    health: SourceHealth,
+    checking: Boolean,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     style: BeansUIStyle,
+    onCheck: () -> Unit,
+    onDeepCheck: () -> Unit,
+    onShowCapability: () -> Unit,
     onEdit: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
@@ -788,6 +1003,9 @@ private fun SourceRow(
 ) {
     val colors = BeansTheme.colors
     val shape = RoundedCornerShape(18.dp)
+    val capability = remember(source.id, source.template, source.script, source.headers) {
+        SourceHealthChecker.capabilitySummary(source)
+    }
 
     Column(
         modifier = Modifier
@@ -821,6 +1039,48 @@ private fun SourceRow(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                // 健康状态行：绿 = 可用，红/橙 = 有问题，灰 = 还没检查。
+                SourceHealthLine(health = health, checking = checking)
+                // 能力行：`支持：kg (128k, 320k, …); tx (…)`，点一下看全部。
+                if (capability.isNotBlank()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                BeansHaptics.select()
+                                onShowCapability()
+                            },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = beansLocalized("支持：", "Supports: "),
+                            color = colors.comment,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = capability,
+                            color = colors.comment,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        // 被截断时给一个明确的展开入口，避免「看得见却看不全」。
+                        if (capability.length > CapabilityCollapseLimit) {
+                            Text(
+                                text = beansLocalized("全部", "All"),
+                                color = colors.accent,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
             }
             Switch(
                 checked = source.enabled,
@@ -859,9 +1119,88 @@ private fun SourceRow(
                 tint = DeleteRed,
                 style = style,
             )
+            // 盾牌：普通点击重跑结构检查；脚本音源额外做一次 WebView 求值（用户显式触发）。
+            SourceCheckButton(
+                health = health,
+                busy = checking,
+                tint = healthTint(health),
+                style = style,
+                onClick = {
+                    BeansHaptics.tap()
+                    if (source.isScript) onDeepCheck() else onCheck()
+                },
+            )
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// MARK: - 健康状态显示
+// ---------------------------------------------------------------------------------------------
+
+/** 健康结论行的配色。 */
+private val HealthGreen = Color(red = 0.29f, green = 0.72f, blue = 0.44f)
+private val HealthAmber = Color(red = 0.95f, green = 0.62f, blue = 0.20f)
+
+/** `Ok` 用绿色，`Failed` 用橙红，`Unknown` 用中性灰（由调用方传 `colors.comment`）。 */
+@Composable
+private fun healthTint(health: SourceHealth): Color {
+    val colors = BeansTheme.colors
+    return when (health) {
+        SourceHealth.Unknown -> colors.comment
+        is SourceHealth.Ok -> HealthGreen
+        is SourceHealth.Failed -> HealthAmber
+    }
+}
+
+/**
+ * 健康状态行。
+ *
+ * 绿底勾选 = [SourceHealth.Ok]，橙红感叹 = [SourceHealth.Failed]，灰色圆圈 = [SourceHealth.Unknown]；
+ * 正在检查时显示一行「正在检查…」而不是把上一次的结论留在那儿。
+ */
+@Composable
+private fun SourceHealthLine(health: SourceHealth, checking: Boolean) {
+    val colors = BeansTheme.colors
+    val tint = if (checking) colors.accent else healthTint(health)
+    val icon = when {
+        checking -> Icons.Rounded.Refresh
+        health is SourceHealth.Ok -> Icons.Rounded.Check
+        health is SourceHealth.Failed -> Icons.Rounded.Warning
+        else -> Icons.Rounded.Verified
+    }
+    val text = when {
+        checking -> beansLocalized("正在检查…", "Checking…")
+        health is SourceHealth.Ok -> health.detail
+        health is SourceHealth.Failed -> health.reason
+        else -> beansLocalized("尚未检查，点右侧盾牌验证", "Not checked yet — tap the shield to verify")
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(12.dp),
+        )
+        Text(
+            text = text,
+            color = tint,
+            fontSize = 11.sp,
+            fontWeight = if (health is SourceHealth.Ok && !checking) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 能力行超过这个长度才显示「全部」入口。 */
+private const val CapabilityCollapseLimit = 34
 
 /** 「编辑」胶囊（对应 iOS `Label(..., systemImage: "slider.horizontal.3")`）。 */
 @Composable
@@ -894,7 +1233,7 @@ private fun SourceEditButton(onClick: () -> Unit, style: BeansUIStyle) {
     }
 }
 
-/** 小号圆形图标按钮（上移 / 下移 / 删除）。`enabled = false` 时变淡且不响应点击。 */
+/** 小号圆形图标按钮（上移 / 下移 / 删除 / 校验）。`enabled = false` 时变淡且不响应点击。 */
 @Composable
 private fun SourceMiniButton(
     systemName: String,
@@ -902,6 +1241,7 @@ private fun SourceMiniButton(
     tint: Color,
     style: BeansUIStyle,
     enabled: Boolean = true,
+    icon: ImageVector? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
 
@@ -919,10 +1259,54 @@ private fun SourceMiniButton(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = BeansIcons.of(systemName, Icons.Rounded.Description),
+            imageVector = icon ?: BeansIcons.of(systemName, Icons.Rounded.Description),
             contentDescription = null,
             tint = if (enabled) tint else tint.copy(alpha = 0.3f),
             modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+/**
+ * 校验盾牌按钮（对应 iOS 的 shield / checkmark 图标）。
+ *
+ * 图标随健康状态变化（勾 / 感叹 / 盾牌），[busy] 时换成匀速旋转的刷新图标。
+ * 旋转保持 32.dp 的点击区不变，列表不会因为状态切换而跳动。
+ */
+@Composable
+private fun SourceCheckButton(
+    health: SourceHealth,
+    busy: Boolean,
+    tint: Color,
+    style: BeansUIStyle,
+    onClick: () -> Unit,
+) {
+    val spin = rememberInfiniteTransition(label = "sourceCheckSpin")
+    val angle by spin.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(animation = tween(durationMillis = 900, easing = LinearEasing)),
+        label = "sourceCheckAngle",
+    )
+    val icon = when {
+        busy -> Icons.Rounded.Refresh
+        health is SourceHealth.Ok -> Icons.Rounded.Check
+        health is SourceHealth.Failed -> Icons.Rounded.Warning
+        else -> Icons.Rounded.Verified
+    }
+
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .rotate(if (busy) angle else 0f),
+    ) {
+        SourceMiniButton(
+            systemName = "checkmark.shield",
+            onClick = { if (!busy) onClick() },
+            tint = tint,
+            style = style,
+            enabled = !busy,
+            icon = icon,
         )
     }
 }

@@ -85,6 +85,7 @@ import com.lulu.music.data.prefs.BeansUIStyle
 import com.lulu.music.data.prefs.SettingsStore
 import com.lulu.music.playback.PlaybackController
 import com.lulu.music.ui.LocalBeansNavigator
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCapsuleShape
 import com.lulu.music.ui.components.BeansCoverImage
@@ -467,6 +468,7 @@ fun DiscoverScreen() {
                 BeansToastCenter.show(beansLocalized("私人漫游暂时没有推荐", "Personal FM has no recommendations yet"))
             } else {
                 PlaybackController.play(songs, 0)
+                PlayerOpenRequest.request()
                 BeansToastCenter.show(beansLocalized("已开启私人漫游", "Personal FM started"))
             }
         } catch (error: Exception) {
@@ -490,6 +492,7 @@ fun DiscoverScreen() {
                 BeansToastCenter.show(beansLocalized("私人漫游暂时没有推荐", "Personal FM has no recommendations yet"))
             } else {
                 PlaybackController.play(songs, 0)
+                PlayerOpenRequest.request()
                 BeansToastCenter.show(beansLocalized("已开启私人漫游", "Personal FM started"))
             }
         } catch (error: Exception) {
@@ -541,6 +544,7 @@ fun DiscoverScreen() {
                 BeansToastCenter.show(beansLocalized("心动模式暂时不可用", "Heartbeat mode is unavailable right now"))
             } else {
                 PlaybackController.play(songs, 0)
+                PlayerOpenRequest.request()
                 BeansToastCenter.show(beansLocalized("已开启心动模式", "Heartbeat mode started"))
             }
         } catch (error: Exception) {
@@ -854,7 +858,10 @@ fun DiscoverScreen() {
                                             hPad = hPad,
                                             currentSong = currentSong,
                                             isPlaying = isPlaying,
-                                            onSongClick = { index -> PlaybackController.play(dailySongs, index) },
+                                            onSongClick = { index ->
+                                                PlaybackController.play(dailySongs, index)
+                                                PlayerOpenRequest.request()
+                                            },
                                             onMoreClick = {
                                                 BeansHaptics.tap()
                                                 sheet = DiscoverSheetRequest(
@@ -1907,6 +1914,9 @@ private fun DiscoverSongsSheet(
                         if (songs.isNotEmpty()) {
                             BeansHaptics.tap()
                             PlaybackController.play(songs, 0)
+                            PlayerOpenRequest.request()
+                            // 弹层是独立的 Dialog 窗口，会盖在新打开的播放页上，必须先收起。
+                            onDismiss()
                         }
                     },
                 )
@@ -1918,6 +1928,8 @@ private fun DiscoverSongsSheet(
                         if (songs.isNotEmpty()) {
                             BeansHaptics.tap()
                             PlaybackController.play(songs, Random.nextInt(songs.size))
+                            PlayerOpenRequest.request()
+                            onDismiss()
                         }
                     },
                 )
@@ -1949,6 +1961,8 @@ private fun DiscoverSongsSheet(
                             onClick = {
                                 BeansHaptics.tap()
                                 PlaybackController.play(songs, index)
+                                PlayerOpenRequest.request()
+                                onDismiss()
                             },
                         )
                         DiscoverDivider()

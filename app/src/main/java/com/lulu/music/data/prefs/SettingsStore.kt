@@ -87,6 +87,9 @@ object SettingsStore {
     private val KEY_LYRICS_ALIGN = stringPreferencesKey("beans.lyrics.align")
     private val KEY_LYRIC_OFFSET = floatPreferencesKey("beans.lyricOffset")
 
+    /** 全屏播放器版式：cover / vinyl / lyrics / minimal（见 `PlayerLayout.fromRaw`）。 */
+    private val KEY_PLAYER_LAYOUT = stringPreferencesKey("beans.playerLayout")
+
     private val KEY_ENABLED_PROVIDERS = stringPreferencesKey("beans.enabledProviders")
     private val KEY_HOME_PROVIDER = stringPreferencesKey("beans.homeSource")
     private val KEY_TAB_LABELS = booleanPreferencesKey("beans.tabLabelsVisible")
@@ -283,6 +286,19 @@ object SettingsStore {
     }
 
     fun setLyricOffset(value: Float) = set(KEY_LYRIC_OFFSET, value)
+
+    // ---- player layout ----------------------------------------------------
+    /**
+     * 全屏播放器版式，原始字符串（`cover` / `vinyl` / `lyrics` / `minimal`）。
+     *
+     * 这里刻意存字符串而不是 `PlayerLayout` 枚举：`data.prefs` 不反向依赖 UI 层，
+     * 由 `ui.screens.PlayerLayout.fromRaw(...)` 负责解析，未知值回落到 `cover`。
+     */
+    val playerLayout: StateFlow<String> by lazy {
+        watch(KEY_PLAYER_LAYOUT, "cover").stateIn(scope, SharingStarted.Eagerly, "cover")
+    }
+
+    fun setPlayerLayout(value: String) = set(KEY_PLAYER_LAYOUT, value)
 
     // ---- platforms --------------------------------------------------------
     /** Comma-separated enabled providers, e.g. "netease,qq,kugou". */

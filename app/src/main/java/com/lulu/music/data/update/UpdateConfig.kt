@@ -16,14 +16,19 @@ object UpdateConfig {
      * 可以放在任意静态托管上（GitHub raw / Gist / 自己的服务器）。
      * 期望返回 JSON：
      * {
-     *   "versionCode": 40,
-     *   "versionName": "1.6.7",
+     *   "versionCode": 41,
+     *   "versionName": "1.6.8",
      *   "notes": "更新说明，可多行",
-     *   "url": "https://.../LuluMusic-1.6.7.apk",
+     *   "url": "https://.../LuluMusic-1.6.8.apk",
      *   "force": false
      * }
+     *
+     * 当前指向本仓库根目录的 `version.json`（raw 地址）。
+     * **发布新版本时只需改仓库里的 `version.json`**，不需要重新编译 App：
+     * 把 versionCode 改成新的（必须大于已发布版本），url 指向新 APK 下载地址即可。
      */
-    const val MANIFEST_URL: String = "https://raw.githubusercontent.com/caz0203/Lulumusic02/main/version.json"
+    const val MANIFEST_URL: String =
+        "https://raw.githubusercontent.com/caz0203/Lulumusic02/main/version.json"
 
     /** 网络超时（毫秒）；检查更新不应该拖慢启动。 */
     const val TIMEOUT_MS: Long = 6000

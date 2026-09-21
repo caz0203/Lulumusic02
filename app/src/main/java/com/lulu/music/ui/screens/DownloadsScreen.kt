@@ -39,6 +39,7 @@ import com.lulu.music.data.prefs.SettingsStore
 import com.lulu.music.data.store.DownloadStore
 import com.lulu.music.playback.DownloadManager
 import com.lulu.music.playback.PlaybackController
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansCoverImage
 import com.lulu.music.ui.components.BeansEmptyState
 import com.lulu.music.ui.components.BeansGlass
@@ -140,6 +141,7 @@ fun DownloadsScreen(onBack: () -> Unit) {
                                     songs = records.map { it.song },
                                     startIndex = records.indexOf(record),
                                 )
+                                PlayerOpenRequest.request()
                             }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,

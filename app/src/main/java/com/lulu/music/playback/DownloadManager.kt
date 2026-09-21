@@ -94,7 +94,14 @@ object DownloadManager {
                 val target = File(base, fileName)
                 val temp = File(base, "$fileName.part")
 
-                val request = Request.Builder().url(url).build()
+                // 与播放共用同一套平台请求头：QQ / 酷狗 CDN 缺 Referer 会 403，
+                // 第三方音源直链也可能要求自己的 UA / Referer / Cookie。
+                val requestBuilder = Request.Builder().url(url)
+                runCatching {
+                    MediaResolver.streamRequestHeaders(android.net.Uri.parse(url))
+                        .forEach { (key, value) -> requestBuilder.header(key, value) }
+                }
+                val request = requestBuilder.build()
                 Http.streamClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IllegalStateException("HTTP ${response.code}")

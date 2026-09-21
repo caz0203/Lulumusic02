@@ -88,6 +88,7 @@ import com.lulu.music.data.prefs.SettingsStore
 import com.lulu.music.data.store.FavoritesStore
 import com.lulu.music.data.store.SearchHistoryStore
 import com.lulu.music.playback.PlaybackController
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCapsuleShape
 import com.lulu.music.ui.components.BeansCoverImage
@@ -1178,8 +1179,14 @@ private fun ResultsArea(
             currentSongKey = currentSongKey,
             isPlaying = isPlaying,
             onRetry = onRetry,
-            onPlayAll = { PlaybackController.play(state.songResults, 0) },
-            onPlay = { index -> PlaybackController.play(state.songResults, index) },
+            onPlayAll = {
+                PlaybackController.play(state.songResults, 0)
+                PlayerOpenRequest.request()
+            },
+            onPlay = { index ->
+                PlaybackController.play(state.songResults, index)
+                PlayerOpenRequest.request()
+            },
             modifier = modifier,
         )
 
@@ -1829,6 +1836,7 @@ private fun SearchArtistSheet(
                                     onClick = {
                                         BeansHaptics.tap()
                                         PlaybackController.play(displayed, 0)
+                                        PlayerOpenRequest.request()
                                         onDismiss()
                                     },
                                 )
@@ -1839,6 +1847,7 @@ private fun SearchArtistSheet(
                                     onClick = {
                                         BeansHaptics.tap()
                                         PlaybackController.play(displayed.shuffled(), 0)
+                                        PlayerOpenRequest.request()
                                         onDismiss()
                                     },
                                 )
@@ -1868,6 +1877,9 @@ private fun SearchArtistSheet(
                         onClick = {
                             BeansHaptics.tap()
                             PlaybackController.play(displayed, index)
+                            PlayerOpenRequest.request()
+                            // 弹层是独立 Dialog 窗口，会盖在新打开的播放页上。
+                            onDismiss()
                         },
                     )
                 }
@@ -1914,6 +1926,7 @@ private fun SearchArtistSheet(
                                                 }
                                                 if (songs.isNotEmpty()) {
                                                     PlaybackController.play(songs, 0)
+                                                    PlayerOpenRequest.request()
                                                     onDismiss()
                                                 } else {
                                                     BeansToastCenter.show(
@@ -2432,6 +2445,8 @@ private fun SearchAlbumSheet(
                                 onClick = {
                                     BeansHaptics.tap()
                                     PlaybackController.play(tracks, 0)
+                                    PlayerOpenRequest.request()
+                                    onDismiss()
                                 },
                                 uiStyle = uiStyle,
                                 icon = Icons.Rounded.PlayArrow,
@@ -2448,6 +2463,8 @@ private fun SearchAlbumSheet(
                         onClick = {
                             BeansHaptics.tap()
                             PlaybackController.play(tracks, index)
+                            PlayerOpenRequest.request()
+                            onDismiss()
                         },
                         onPlayNext = {
                             BeansHaptics.medium()

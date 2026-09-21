@@ -92,6 +92,7 @@ import com.lulu.music.data.store.FavoritesStore
 import com.lulu.music.data.store.PlayHistoryStore
 import com.lulu.music.playback.PlaybackController
 import com.lulu.music.ui.LocalBeansNavigator
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCapsule
 import com.lulu.music.ui.components.BeansCoverImage
@@ -410,6 +411,7 @@ fun LibraryScreen() {
                 onPlayAll = { list ->
                     if (list.isNotEmpty()) {
                         PlaybackController.play(list, 0)
+                        PlayerOpenRequest.request()
                         BeansHaptics.tap()
                     }
                 },
@@ -455,6 +457,7 @@ fun LibraryScreen() {
                         val list = PlayHistoryStore.history.value
                         val index = list.indexOfFirst { it.identityKey == song.identityKey }
                         PlaybackController.play(list, if (index >= 0) index else 0)
+                        PlayerOpenRequest.request()
                     },
                     onOpenAll = {
                         BeansHaptics.tap()
@@ -696,6 +699,7 @@ fun LibraryScreen() {
                 scanning = audioScanning,
                 denied = audioDenied,
                 onRequestPermission = { audioPermissionLauncher.launch(audioPermission) },
+                onDismiss = { showAudioSheet = false },
                 colors = colors,
             )
         }
@@ -708,7 +712,12 @@ fun LibraryScreen() {
                 onPlay = { index ->
                     BeansHaptics.tap()
                     val list = PlayHistoryStore.history.value
-                    if (index in list.indices) PlaybackController.play(list, index)
+                    if (index in list.indices) {
+                        PlaybackController.play(list, index)
+                        PlayerOpenRequest.request()
+                        // 弹层是独立 Dialog 窗口，会盖在新打开的播放页上。
+                        showHistory = false
+                    }
                 },
                 onClear = {
                     BeansHaptics.tap()
@@ -732,15 +741,23 @@ fun LibraryScreen() {
                     if (songs.isNotEmpty()) {
                         BeansHaptics.tap()
                         PlaybackController.play(songs, 0)
+                        PlayerOpenRequest.request()
+                        openLocalPlaylistId = null
                     }
                 },
                 onShuffle = { songs ->
                     if (songs.isNotEmpty()) {
                         BeansHaptics.tap()
                         PlaybackController.play(songs.shuffled(), 0)
+                        PlayerOpenRequest.request()
+                        openLocalPlaylistId = null
                     }
                 },
-                onPlaySong = { songs, index -> PlaybackController.play(songs, index) },
+                onPlaySong = { songs, index ->
+                    PlaybackController.play(songs, index)
+                    PlayerOpenRequest.request()
+                    openLocalPlaylistId = null
+                },
                 onAddSongs = { songs ->
                     val index = localPlaylists.indexOfFirst { it.id == id }
                     if (index >= 0) {
@@ -1597,6 +1614,7 @@ private fun LocalAudioSheet(
     scanning: Boolean,
     denied: Boolean,
     onRequestPermission: () -> Unit,
+    onDismiss: () -> Unit,
     colors: com.lulu.music.ui.theme.BeansColors,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -1654,7 +1672,7 @@ private fun LocalAudioSheet(
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
                 ) {
                     items(files, key = { it.id }) { file ->
-                        LocalAudioRow(file = file, queue = files)
+                        LocalAudioRow(file = file, queue = files, onDismiss = onDismiss)
                     }
                 }
             }
@@ -1679,7 +1697,7 @@ private fun LocalAudioSheet(
 }
 
 @Composable
-private fun LocalAudioRow(file: LocalAudioFile, queue: List<LocalAudioFile>) {
+private fun LocalAudioRow(file: LocalAudioFile, queue: List<LocalAudioFile>, onDismiss: () -> Unit) {
     val colors = BeansTheme.colors
     val interaction = remember(file.id) { MutableInteractionSource() }
     Row(
@@ -1702,6 +1720,9 @@ private fun LocalAudioRow(file: LocalAudioFile, queue: List<LocalAudioFile>) {
                 }
                 val index = queue.indexOfFirst { it.id == file.id }.coerceAtLeast(0)
                 PlaybackController.play(songs, index)
+                PlayerOpenRequest.request()
+                // 本机音频弹层是独立 Dialog 窗口，会盖在新打开的播放页上。
+                onDismiss()
             }
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,

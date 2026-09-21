@@ -996,7 +996,16 @@ object QQMusicApi {
         val reqData = req.optMap("data") ?: return null
         val infos = reqData.arr("midurlinfo").orEmptyObjects()
         val playableInfos = infos.filter { !(it.opt("purl") as? String).isNullOrEmpty() }
-        if (playableInfos.isEmpty()) return null
+        if (playableInfos.isEmpty()) {
+            // 官方没给地址（VIP / 风控）：把响应里的标记字段打出来，便于判断是会员受限还是被风控。
+            val marker = infos.firstOrNull()
+            Log.d(
+                LOG_TAG,
+                "QQ vkey 无可播地址：br=$br result=${marker?.opt("result")} errtype=${marker?.opt("errtype")} " +
+                    "已登录=${if (qqAuth.isLoggedIn) "是" else "否"}",
+            )
+            return null
+        }
         val sips = reqData.arr("sip")?.strings() ?: emptyList()
         val cdnBases = qqCDNBases(sips)
         var unverifiedCandidate: String? = null
@@ -1016,7 +1025,11 @@ object QQMusicApi {
                 if (candidate.toHttpUrlOrNull() == null) continue
                 if (unverifiedCandidate == null) unverifiedCandidate = candidate
                 when (probeAudioURL(candidate, cookie = if (qqAuth.isLoggedIn) qqAuth.cookieHeader else "")) {
-                    AudioProbeResult.PLAYABLE -> return candidate
+                    AudioProbeResult.PLAYABLE -> {
+                        // 只有 vkey 响应里的 filename 可能带有试听 / 权限标记，留一行现场便于真机核对。
+                        Log.d(LOG_TAG, "QQ vkey 命中：br=$br 文件=${info.opt("filename")}")
+                        return candidate
+                    }
                     AudioProbeResult.FORBIDDEN -> continue
                     AudioProbeResult.INDETERMINATE ->
                         if (unverifiedCandidate == null) unverifiedCandidate = candidate

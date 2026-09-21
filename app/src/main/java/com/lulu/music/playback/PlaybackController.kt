@@ -8,12 +8,19 @@ import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.lulu.music.data.model.BeansAudioQuality
 import com.lulu.music.data.model.Song
 import com.lulu.music.data.model.SongSource
 import com.lulu.music.data.prefs.SettingsStore
+import com.lulu.music.data.source.PlaybackSource
+import com.lulu.music.data.source.UnblockService
+import com.lulu.music.data.source.UnblockSourceStore
+import com.lulu.music.data.store.CrashLog
+import com.lulu.music.ui.components.BeansToastCenter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +33,10 @@ import kotlinx.serialization.json.Json
 
 /** Repeat modes exposed to the UI. */
 enum class RepeatMode { OFF, ALL, ONE }
+
+/** 播放失败的可读现场：写进 [CrashLog]，用户可在 设置 → 崩溃日志 里直接看到原因。 */
+private class PlaybackFailure(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
 
 /**
  * App-side playback facade.
@@ -85,6 +96,21 @@ object PlaybackController {
 
     private var initialised = false
 
+    /**
+     * 本轮队列里已经走过后备重试的歌曲（identityKey）。
+     *
+     * 官方地址「拿得到但播不了」（VIP 试听片段、过期直链、CDN 403/404、空音频）时，
+     * 只有真的播放失败才知道，所以后备重试发生在播放错误之后；这里记录已重试过的歌，
+     * 保证同一首歌在同一轮队列里最多重试一次，坏掉的歌不会无限循环。
+     */
+    private val retriedViaFallback = HashSet<String>()
+
+    /** 最近一次后备重试的歌曲；用来区分「换歌」和「重试原地替换当前条目」。 */
+    private var lastFallbackKey: String? = null
+
+    /** 正在解析中的歌曲；避免同一次失败触发多次解析。 */
+    private var fallbackInFlightKey: String? = null
+
     /** Idempotent. Safe to call from Activity#onCreate. */
     fun init(context: Context) {
         if (initialised) return
@@ -114,12 +140,119 @@ object PlaybackController {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             _currentSong.value = mediaItem?.let(::songFromMediaItem)
             _queueIndex.value = controller?.currentMediaItemIndex ?: 0
+            // 后备重试是把当前条目原地换成直链（mediaId 不变），那不是「换歌」；
+            // 真正切到别的歌时才算新一轮，清掉重试记录让下一首也能享受后备。
+            val id = mediaItem?.mediaId
+            if (id == null || id != lastFallbackKey) {
+                retriedViaFallback.clear()
+                lastFallbackKey = null
+            }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
             if (isPlaying) startPositionTicker()
         }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // 监听器里绝不向外抛异常：任何意外只写进崩溃日志。
+            runCatching { onPlaybackError(error) }
+                .onFailure { runCatching { CrashLog.write(it) } }
+        }
+    }
+
+    // ---- 播放失败 → 第三方音源后备 -----------------------------------------
+
+    /**
+     * 官方接口返回「非空但不可用」的地址（VIP 试听片段、过期直链、CDN 403/404、空音频）时，
+     * `MediaResolver` 无从判断，只有播放真的失败才知道。这里对齐 iOS `PlayerManager`：
+     * 失败后再去问第三方音源，拿到直链就用**直接地址**重播同一首歌（不再走 `beans://`，
+     * 否则占位 URI 会重新解析回那个坏掉的官方地址）。
+     */
+    private fun onPlaybackError(error: PlaybackException) {
+        val c = controller ?: return
+        val code = error.errorCodeName
+        val detail = error.message?.takeIf { it.isNotBlank() } ?: "无详细信息"
+        val song = c.currentMediaItem?.let(::songFromMediaItem) ?: _currentSong.value
+        if (song == null) {
+            CrashLog.write(PlaybackFailure("播放失败（当前没有歌曲）：错误码=$code｜详情=$detail", error))
+            return
+        }
+        val key = song.identityKey
+
+        // 1) 先留现场：以前失败是完全静默的，用户/开发者都无从查起。
+        CrashLog.write(
+            PlaybackFailure(
+                "播放失败：${song.name} - ${song.artists}｜歌曲=$key｜错误码=$code｜详情=$detail",
+                error,
+            ),
+        )
+
+        // 2) 设备本地文件没有第三方解析可言，直接报错。
+        if (song.localUri != null) {
+            reportUnplayable(song, "设备本地文件播放失败")
+            return
+        }
+
+        val playbackSource = PlaybackSource.fromKey(SettingsStore.playbackSource.value)
+        val enabledSources = UnblockSourceStore.enabledSources
+        if (playbackSource == PlaybackSource.OFFICIAL) {
+            reportUnplayable(song, "播放来源=仅官方，不尝试第三方音源")
+            return
+        }
+        if (enabledSources.isEmpty()) {
+            reportUnplayable(song, "没有已启用的第三方音源")
+            return
+        }
+        if (key in retriedViaFallback || fallbackInFlightKey == key) {
+            reportUnplayable(song, "第三方后备地址也无法播放")
+            return
+        }
+
+        val resumeMs = c.currentPosition.coerceAtLeast(0L)
+        val quality = BeansAudioQuality.fromRaw(SettingsStore.audioQuality.value)
+        retriedViaFallback.add(key)
+        lastFallbackKey = key
+        fallbackInFlightKey = key
+
+        scope.launch {
+            val resolved = runCatching { UnblockService.resolveStream(song, quality) }.getOrNull()
+            if (fallbackInFlightKey == key) fallbackInFlightKey = null
+            val url = resolved?.url?.takeIf { it.isNotBlank() }
+            if (url == null) {
+                reportUnplayable(song, "第三方音源没有解析出可用地址")
+                return@launch
+            }
+            // 解析期间用户可能已经切歌 / 清空队列，这时不要动播放器。
+            val live = controller
+            if (live !== c || live.currentMediaItem?.mediaId != key) return@launch
+
+            // 直链本身可能需要音源自己的请求头（UA / Referer / Cookie / X-*）。
+            MediaResolver.rememberStreamHeaders(url, resolved?.headers)
+
+            val index = live.currentMediaItemIndex
+            runCatching {
+                // 改动播放器一律回到主线程（当前协程已经在主线程，可立即执行）。
+                onMain {
+                    live.replaceMediaItem(index, directMediaItemFor(song, url))
+                    live.prepare()
+                    if (resumeMs > 0) live.seekTo(index, resumeMs)
+                    live.play()
+                }
+            }.onSuccess {
+                CrashLog.write(
+                    PlaybackFailure("第三方音源后备重试：${song.name} - ${song.artists}｜歌曲=$key｜已从 ${resumeMs}ms 继续"),
+                )
+            }.onFailure { failure ->
+                reportUnplayable(song, "切换第三方地址失败：${failure.message ?: failure}")
+            }
+        }
+    }
+
+    /** 兜底反馈：一句中文提示 + 一条可读的崩溃日志。 */
+    private fun reportUnplayable(song: Song, reason: String) {
+        runCatching { CrashLog.write(PlaybackFailure("无法播放：${song.name} - ${song.artists}｜${song.identityKey}｜$reason")) }
+        onMain { BeansToastCenter.show("该歌曲无法播放") }
     }
 
     private fun syncFromController() {
@@ -171,12 +304,27 @@ object PlaybackController {
     // ---- media item <-> song ------------------------------------------------
 
     private fun mediaItemFor(song: Song): MediaItem {
-        val extras = Bundle().apply {
-            runCatching { putString(EXTRA_SONG, json.encodeToString(Song.serializer(), song)) }
-        }
         // Device-local tracks bypass the platform resolvers entirely.
         val uri = song.localUri?.let { runCatching { Uri.parse(it) }.getOrNull() }
             ?: SongUri.encode(song)
+        return mediaItemFor(song, uri)
+    }
+
+    /**
+     * 用第三方直链构造条目；媒体元数据 / extras 与占位条目完全一致，
+     * 所以 UI、锁屏（mediaId 不变）与播放历史都照旧。
+     */
+    private fun directMediaItemFor(song: Song, url: String): MediaItem {
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: SongUri.encode(song)
+        return mediaItemFor(song, uri)
+    }
+
+    private fun mediaItemFor(song: Song, uri: Uri): MediaItem {
+        // 占位 URI 只带 id；懒解析时第三方（关键词 / 脚本）音源还要用到歌名与歌手。
+        QueuedSongs.remember(song)
+        val extras = Bundle().apply {
+            runCatching { putString(EXTRA_SONG, json.encodeToString(Song.serializer(), song)) }
+        }
         return MediaItem.Builder()
             .setUri(uri)
             .setMediaId(song.identityKey)
@@ -236,6 +384,10 @@ object PlaybackController {
     fun play(songs: List<Song>, startIndex: Int = 0) {
         if (songs.isEmpty()) return
         val index = startIndex.coerceIn(0, songs.lastIndex)
+        // 新的一轮播放：清掉上一轮的后备重试记录。
+        retriedViaFallback.clear()
+        lastFallbackKey = null
+        fallbackInFlightKey = null
         _queue.value = songs
         _queueIndex.value = index
         _currentSong.value = songs[index]
@@ -349,6 +501,9 @@ object PlaybackController {
     }
 
     fun clearQueue() {
+        retriedViaFallback.clear()
+        lastFallbackKey = null
+        fallbackInFlightKey = null
         _queue.value = emptyList()
         _currentSong.value = null
         onMain { controller?.clearMediaItems() }

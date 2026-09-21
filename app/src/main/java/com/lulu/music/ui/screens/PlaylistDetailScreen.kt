@@ -59,6 +59,7 @@ import com.lulu.music.data.prefs.BeansUIStyle
 import com.lulu.music.data.prefs.SettingsStore
 import com.lulu.music.data.store.FavoritesStore
 import com.lulu.music.playback.PlaybackController
+import com.lulu.music.ui.PlayerOpenRequest
 import com.lulu.music.ui.components.BeansBottomSheet
 import com.lulu.music.ui.components.BeansCoverImage
 import com.lulu.music.ui.components.BeansEmptyState
@@ -253,12 +254,14 @@ fun PlaylistDetailScreen(
                             if (displayedTracks.isNotEmpty()) {
                                 BeansHaptics.tap()
                                 PlaybackController.play(displayedTracks, 0)
+                                PlayerOpenRequest.request()
                             }
                         },
                         onShuffle = {
                             if (displayedTracks.isNotEmpty()) {
                                 BeansHaptics.tap()
                                 PlaybackController.play(displayedTracks.shuffled(), 0)
+                                PlayerOpenRequest.request()
                             }
                         },
                     )
@@ -284,6 +287,7 @@ fun PlaylistDetailScreen(
                             onClick = {
                                 BeansHaptics.tap()
                                 PlaybackController.play(displayedTracks, index)
+                                PlayerOpenRequest.request()
                             },
                             onLike = {
                                 BeansHaptics.tap()

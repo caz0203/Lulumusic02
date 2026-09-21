@@ -411,6 +411,7 @@ private fun PlaybackSection(
     val hapticsEnabled by SettingsStore.hapticsEnabled.collectAsState()
     val autoResume by SettingsStore.autoResumeLast.collectAsState()
     val playbackSource by SettingsStore.playbackSource.collectAsState()
+    val playerLayout by SettingsStore.playerLayout.collectAsState()
 
     SettingsGroupCard(
         title = beansLocalized("播放设置", "Playback"),
@@ -492,6 +493,34 @@ private fun PlaybackSection(
             systemName = "play.square.stack",
             checked = autoResume,
             onCheckedChange = { SettingsStore.setAutoResume(it) },
+        )
+
+        // ---------------------------------------------------------------- 播放器布局
+        SettingsDivider()
+
+        SettingsFieldLabel(beansLocalized("播放器布局", "Player layout"))
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PlayerLayout.entries.forEach { layout ->
+                SettingsChip(
+                    title = layout.displayName,
+                    selected = layout.raw == playerLayout,
+                    onClick = {
+                        SettingsStore.setPlayerLayout(layout.raw)
+                        BeansHaptics.select()
+                    },
+                )
+            }
+        }
+        Text(
+            text = beansLocalized(
+                "全屏播放器的版式，也可以在播放页右上角随时切换。",
+                "Full-screen player style; also switchable from the player's top bar.",
+            ),
+            color = colorsComment(),
+            fontSize = 11.sp,
         )
 
         // ---------------------------------------------------------------- 播放来源

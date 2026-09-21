@@ -113,4 +113,16 @@ object SourceQualities {
         val match = SCRIPT_QUALITY_REGEX.find(script) ?: return null
         return explicitQualities(match.groupValues[1])
     }
+
+    /**
+     * 脚本里是否**声明**了音质档位：`null` = 完全没有 `qualitys` / `qualityOptions` 片段，
+     * 空列表 = 有片段但一个有效档位都解析不出来。
+     *
+     * 供 [SourceHealthChecker] 推导「支持：…」时区分「没声明」与「声明了但无效」。
+     */
+    fun qualitiesDeclaredInScript(script: String): List<ThirdPartyAudioQuality>? {
+        if (script.isBlank()) return null
+        val match = SCRIPT_QUALITY_REGEX.find(script) ?: return null
+        return explicitQualities(match.groupValues[1])
+    }
 }

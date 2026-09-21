@@ -3,6 +3,7 @@ package com.lulu.music.playback
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -24,13 +25,19 @@ class BeansPlayerService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
+        // 刻意不在这里 setUserAgent：DefaultHttpDataSource 会在逐请求头之后再写一次工厂 UA，
+        // 那样 [StreamHeaderDataSourceFactory] 为 QQ / 酷狗设置的平台 UA 会被覆盖。
+        // UA 现在统一由 MediaResolver.streamRequestHeaders 逐请求给出。
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(USER_AGENT)
             .setConnectTimeoutMs(20_000)
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(BeansDataSourceFactory(httpFactory))
+        // 平台相关的请求头（QQ / 酷狗的 Referer + Cookie）在 [StreamHeaderDataSourceFactory] 里
+        // 按最终地址逐请求设置；外面再套一层 DefaultDataSource，让 file://（已下载文件）、
+        // content://（本地导入）等非 HTTP 地址也能正常播放。
+        val streamFactory = DefaultDataSource.Factory(this, StreamHeaderDataSourceFactory(httpFactory))
+        val mediaSourceFactory = DefaultMediaSourceFactory(BeansDataSourceFactory(streamFactory))
 
         val exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -78,7 +85,7 @@ class BeansPlayerService : MediaSessionService() {
     }
 
     companion object {
-        /** Matches the browser UA the platform APIs expect for media requests. */
+        /** 默认拉流 UA（网易云等平台用浏览器 UA 即可）。逐请求写进请求头，见 MediaResolver。 */
         const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     }

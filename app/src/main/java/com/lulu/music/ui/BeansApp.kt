@@ -151,6 +151,23 @@ fun BeansApp() {
         }
     }
 
+    /**
+     * 用户点歌后自动展开全屏播放器（对齐网易云：点歌即进播放页）。
+     *
+     * 只在用户点按的路径上由 [PlayerOpenRequest.request] 触发 —— 上一首 / 下一首 / 自动续播 /
+     * 启动恢复会话都会改变 `currentSong`，但不会经过这里，所以不会在用户浏览歌单时抢屏。
+     *
+     * 播放页已经在前台时直接忽略，避免连点叠加出多层播放页（返回键要按很多次才能退出）。
+     */
+    LaunchedEffect(navController) {
+        PlayerOpenRequest.requests.collect {
+            val route = navController.currentBackStackEntry?.destination?.route
+            if (route != Routes.PLAYER) {
+                navController.navigate(Routes.PLAYER)
+            }
+        }
+    }
+
     val navigator = remember(navController) {
         BeansNavigator(
             openPlayer = { navController.navigate(Routes.PLAYER) },

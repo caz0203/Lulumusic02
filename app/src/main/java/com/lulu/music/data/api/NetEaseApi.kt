@@ -388,6 +388,10 @@ object NetEaseApi {
         val url: String?,
         /// 存在 freeTrialInfo 表示仅返回试听片段（VIP 歌曲）
         val freeTrial: Boolean,
+        /// 接口返回的付费标记（0 免费 / 1 VIP / 4 付费单曲 / 8 低音质免费）；null 表示接口未返回
+        val fee: Int? = null,
+        /// 接口返回的这段音频的实际时长（毫秒）：试听片段通常只有 30~60 秒
+        val durationMs: Int? = null,
     )
 
     suspend fun songURLInfo(ids: List<Long>, level: String = "standard"): Map<Long, SongURLInfo> {
@@ -404,7 +408,13 @@ object NetEaseApi {
             val rawURL = item.stringOrNull("url")
             val url = if (rawURL.isNullOrEmpty()) null else rawURL
             val freeTrial = item.optMap("freeTrialInfo") != null
-            result[id] = SongURLInfo(url = url, freeTrial = freeTrial)
+            result[id] = SongURLInfo(
+                url = url,
+                freeTrial = freeTrial,
+                fee = item.intOrNull("fee"),
+                // `time` 是这段音频自身的时长（毫秒），试听片段会明显短于整首歌。
+                durationMs = item.intOrNull("time"),
+            )
         }
         return result
     }
