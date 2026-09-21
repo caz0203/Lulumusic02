@@ -1,0 +1,85 @@
+package com.lulu.music.playback
+
+import android.content.Intent
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSessionService
+
+/**
+ * Foreground media service hosting the single ExoPlayer instance and the MediaSession.
+ *
+ * The MediaSession is what gives us the lock-screen / notification controls, Bluetooth controls and
+ * audio-focus handling. Playback URLs for `beans://song` items are resolved lazily through
+ * [BeansDataSourceFactory].
+ */
+class BeansPlayerService : MediaSessionService() {
+
+    private var mediaSession: MediaSession? = null
+    private var player: ExoPlayer? = null
+
+    override fun onCreate() {
+        super.onCreate()
+
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(USER_AGENT)
+            .setConnectTimeoutMs(20_000)
+            .setReadTimeoutMs(30_000)
+            .setAllowCrossProtocolRedirects(true)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(BeansDataSourceFactory(httpFactory))
+
+        val exo = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true,
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
+            .build()
+
+        player = exo
+        EqualizerController.attach(exo.audioSessionId)
+
+        mediaSession = MediaSession.Builder(this, exo).build()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+
+    /**
+     * Keep playing when the task is swiped away, but stop the service when nothing is playing so we
+     * do not hold a foreground slot forever.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val p = player
+        if (p == null || !p.playWhenReady || p.mediaItemCount == 0) {
+            stopSelf()
+        }
+    }
+
+    override fun onDestroy() {
+        EqualizerController.release()
+        mediaSession?.run {
+            player.release()
+            release()
+        }
+        mediaSession = null
+        player = null
+        super.onDestroy()
+    }
+
+    companion object {
+        /** Matches the browser UA the platform APIs expect for media requests. */
+        const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    }
+}
