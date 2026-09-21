@@ -23,7 +23,7 @@ object UpdateConfig {
      *   "force": false
      * }
      */
-    const val MANIFEST_URL: String = ""
+    const val MANIFEST_URL: String = "https://raw.githubusercontent.com/caz0203/Lulumusic02/main/version.json"
 
     /** 网络超时（毫秒）；检查更新不应该拖慢启动。 */
     const val TIMEOUT_MS: Long = 6000
