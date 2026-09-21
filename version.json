@@ -1,0 +1,7 @@
+{
+  "versionCode": 42,
+  "versionName": "1.6.9",
+  "notes": "1. 修复第三方音源导入失败：支持 `//` 行注释头部、嵌套 SERVER_SCRIPT_CONFIG、UTF-8 BOM 文件。\n2. 音源解析不再依赖平台 org.json，导入行为在所有设备一致。\n3. 音乐库顺序调整：我的歌单、最近播放移到本地音乐库之前。\n4. 新增应用内更新检查（就是你现在看到的这个弹窗）。\n5. 新增崩溃日志查看：设置 → 平台显示 → 崩溃日志。",
+  "url": "https://github.com/caz0203/Lulumusic02/releases/download/v1.6.9/LuluMusic-1.6.9.apk",
+  "force": false
+}
