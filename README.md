@@ -5,7 +5,7 @@ rebranded as **LuluMusic**.
 
 - **应用名 / App label:** `LuluMusic`
 - **包名 / Package:** `com.lulu.music`
-- **版本 / Version:** 1.9.2 (versionCode 48)
+- **版本 / Version:** 1.9.3 (versionCode 49)
 - **签名 / Signing:** self-signed, `keystore/lulu.jks`
 
 ## Features
