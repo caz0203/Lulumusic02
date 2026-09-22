@@ -31,9 +31,12 @@ import org.robolectric.annotation.Config
  * `LocalMinimumInteractiveComponentSize` 才会真的变矮 —— 下面的等式就是这条结论的实证：
  *
  * ```
- * 默认行 = 标签 + 4dp + 48dp（Material3 的最小交互区）
+ * M3 对照行（compact = false）= 标签 + 4dp + 48dp（Material3 的最小交互区）
  * 紧凑行 = 标签 + 1dp + 30dp（LocalMinimumInteractiveComponentSize 收到 30dp）
  * ```
+ *
+ * 紧凑形态现在是 [SettingsSliderRow] 的**默认值**（全设置页滑块统一），所以对照行必须显式写
+ * `compact = false`；这两行是同一套数值的「前 / 后」对照，不会被默认值改动而失效。
  *
  * 注意**不要**用 `onNodeWithTag(BeansCompactSliderTag).fetchSemanticsNode().size` 去量滑块：
  * Material3 的 Slider 语义节点是 `MergeDescendants = true` 的，它在语义树里的 bounds 只覆盖
@@ -61,6 +64,7 @@ class SettingsDockCompactSliderRenderTest {
                         steps = 31,
                         onValueChange = {},
                         modifier = Modifier.testTag(NORMAL_TAG),
+                        compact = false,
                     )
                     SettingsSliderRow(
                         title = COMPACT_LABEL,
@@ -93,7 +97,7 @@ class SettingsDockCompactSliderRenderTest {
         composeRule.onNodeWithTag(BeansCompactSliderTag).assertIsDisplayed()
 
         assertEquals(
-            "默认滑块本体仍然是 Material3 的 48dp 最小交互区（这就是「块太大」的根因）",
+            "M3 对照行（compact = false）仍然是 Material3 的 48dp 最小交互区（这就是「块太大」的根因）",
             dp(48),
             normalRow - normalLabel - dp(4),
         )
@@ -115,7 +119,7 @@ class SettingsDockCompactSliderRenderTest {
     private companion object {
         const val NORMAL_TAG = "beans.slider.normal"
         const val COMPACT_TAG = "beans.slider.compact"
-        const val NORMAL_LABEL = "默认形态"
+        const val NORMAL_LABEL = "M3 对照形态"
         const val COMPACT_LABEL = "紧凑形态"
     }
 }

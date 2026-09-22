@@ -148,6 +148,47 @@ class BackupManagerTest {
         assertFalse("stats 不该是 null（用户统计始终导出）", node["stats"] is JsonNull)
     }
 
+    /**
+     * 桌面歌词 / 锁屏歌词这 6 个新键必须真的进备份。
+     *
+     * 这类「新增了设置项但忘了写进 BackupManager」的漏项在换机恢复时表现为「设置悄悄回到默认
+     * 值」，很难被发现，所以用一条显式断言钉住（只断言键与类型，不断言具体值 —— 值可能被本类
+     * 里别的往返测试改过）。
+     */
+    @Test
+    fun desktopAndLockScreenLyricKeysArePartOfTheSettingsSnapshot() {
+        val node = Json.parseToJsonElement(BackupManager.buildJson(BackupManager.Options()).toString()).jsonObject
+        val settings = node["settings"]?.jsonObject
+        assertNotNull("settings 必须是对象", settings)
+        requireNotNull(settings)
+
+        assertNotNull(
+            "beans.lyrics.desktop 必须存在",
+            settings["beans.lyrics.desktop"]?.jsonPrimitive?.booleanOrNull,
+        )
+        assertNotNull(
+            "beans.lyrics.desktopLocked 必须存在",
+            settings["beans.lyrics.desktopLocked"]?.jsonPrimitive?.booleanOrNull,
+        )
+        assertNotNull(
+            "beans.lyrics.desktopX 必须存在",
+            settings["beans.lyrics.desktopX"]?.jsonPrimitive?.intOrNull,
+        )
+        assertNotNull(
+            "beans.lyrics.desktopY 必须存在",
+            settings["beans.lyrics.desktopY"]?.jsonPrimitive?.intOrNull,
+        )
+        assertNotNull(
+            "beans.lyrics.lockScreen 必须存在",
+            settings["beans.lyrics.lockScreen"]?.jsonPrimitive?.booleanOrNull,
+        )
+        val mode = settings["beans.lyrics.lockScreenMode"]?.jsonPrimitive?.contentOrNull
+        assertTrue(
+            "锁屏歌词模式必须是可解析的枚举名，实际：$mode",
+            mode == "SYSTEM" || mode == "CUSTOM_CARD",
+        )
+    }
+
     @Test
     fun exportWritesARealFileAndClearsStaleBackups() = runBlocking {
         val older = File(context.cacheDir, "backups").apply { mkdirs() }

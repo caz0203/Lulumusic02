@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  分享「备份与恢复」导出文件用的 FileProvider 路径。
+
+  只开放应用自己的缓存目录（cacheDir/backups 就是 BackupManager 写备份的位置），
+  不暴露 filesDir / 外部存储，避免把用户数据置于可被其他应用读取的范围。
+-->
+<paths>
+    <cache-path
+        name="backup_cache"
+        path="backups/" />
+    <cache-path
+        name="shared_cache"
+        path="." />
+</paths>

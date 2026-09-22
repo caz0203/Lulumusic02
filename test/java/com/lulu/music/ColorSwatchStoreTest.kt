@@ -152,8 +152,19 @@ class ColorSwatchStoreTest {
     // 设施
     // ------------------------------------------------------------------
 
-    /** 等到 DataStore 里的色板等于 [expected]（写入是异步的；超过 5 秒算失败）。 */
-    private suspend fun awaitStored(expected: String): String? = withTimeoutOrNull(5_000L) {
+    /**
+     * 等到 DataStore 里的色板等于 [expected]。
+     *
+     * 写入本身是异步的（[com.lulu.music.data.prefs.SettingsStore.addCustomColorSwatch] 走
+     * `scope.launch { store.edit { … } }`，即 fire-and-forget），所以这里只能轮询等待，
+     * 匹配上就立刻返回。
+     *
+     * 预算从 5 秒放宽到 30 秒：**这个上限只在失败路径上才用得到**（正常情况毫秒级就返回），
+     * 但在全量套件里 JVM 负载很高（400+ 用例共用一个 JVM，且 SettingsStore 有一批
+     * `SharingStarted.Eagerly` 的 DataStore 订阅在抢同一份 DataStore），5 秒曾被击穿，
+     * 表现为「单独跑绿、全量跑偶发红」。放宽预算不改变任何断言语义。
+     */
+    private suspend fun awaitStored(expected: String): String? = withTimeoutOrNull(30_000L) {
         dataStore().data.first { it[key] == expected }[key]
     }
 
